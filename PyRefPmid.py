@@ -128,7 +128,6 @@ class PubMedProcessor:
         if not doi and entry.get('elocationid', '').startswith('doi:'):
           doi = entry.get('elocationid', '').replace('doi: ', '')
 
-
         details[pmid] = {
           'authors': authors,
           'year': entry.get('pubdate', '').split(' ')[0],
@@ -219,7 +218,6 @@ class PubMedProcessor:
       return 2
 
   def replace_citations(self, markdown_content):
-    """Markdown コンテンツ内の PMID 参照を指定された形式に置換する"""
     """Markdown コンテンツ内の PMID 参照を指定された形式に置換する"""
     output_content = markdown_content
     matches = []
