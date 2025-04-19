@@ -21,7 +21,7 @@ class PubMedProcessor:
   DEFAULT_PMID_REGEX_PATTERN = r'\[pm(?:id)?\s+(\d+)\]\([^)]*\)' # PMID 抽出パターン
   DEFAULT_AUTHOR_THRESHOLD = 0 # 著者名表示の閾値 (0 は全員)
   DEFAULT_CITATION_FORMAT = '({number})'
-  DEFAULT_REFERENCE_ITEM_FORMAT = '{number}. {authors}. {title} {journal} {year};{volume}:{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)'
+  DEFAULT_REFERENCE_ITEM_FORMAT = '{number}. {authors}. {title}. {journal} {year};{volume}:{pages}. doi: {doi}. PMID: {pmid}.'
   DEFAULT_PUBMED_API_BASE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/'
   DEFAULT_API_REQUEST_DELAY = 0.4 # 3リクエスト/秒 以下
 
@@ -114,7 +114,7 @@ class PubMedProcessor:
         authors_list = entry.get('authors', [])
         # 著者名の整形 (閾値に基づいて)
         if self.author_threshold > 0 and len(authors_list) > self.author_threshold:
-          authors = ', '.join([a['name'] for a in authors_list[:self.author_threshold]]) + ', et al'
+          authors = ', '.join([a['name'] for a in authors_list[:self.author_threshold]]) + ', et al.'
         else:
           authors = ', '.join([author['name'] for author in authors_list])
 
@@ -127,6 +127,7 @@ class PubMedProcessor:
         # elocationid もフォールバックとしてチェック (形式が doi: XXXXX の場合)
         if not doi and entry.get('elocationid', '').startswith('doi:'):
           doi = entry.get('elocationid', '').replace('doi: ', '')
+
 
         details[pmid] = {
           'authors': authors,
@@ -166,7 +167,7 @@ class PubMedProcessor:
         number=number,
         authors=details.get('authors', 'N/A'),
         year=details.get('year', 'N/A'),
-        title=details.get('title', 'N/A'),
+        title=details.get('title', 'N/A').rstrip('. '),
         journal=details.get('journal', 'N/A'),
         volume=details.get('volume', ''),
         issue=details.get('issue', ''),
@@ -218,6 +219,7 @@ class PubMedProcessor:
       return 2
 
   def replace_citations(self, markdown_content):
+    """Markdown コンテンツ内の PMID 参照を指定された形式に置換する"""
     """Markdown コンテンツ内の PMID 参照を指定された形式に置換する"""
     output_content = markdown_content
     matches = []

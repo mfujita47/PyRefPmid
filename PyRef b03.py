@@ -8,7 +8,6 @@ import os
 import tkinter as tk
 from tkinter import filedialog
 import logging
-import textwrap # 追加
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,28 +17,21 @@ class PubMedProcessor:
   Markdown ファイル内の PubMed 引用を処理し、
   References リストを生成・置換するクラス。
   """
-  DEFAULT_PMID_REGEX_PATTERN = r'\[pm(?:id)?\s+(\d+)\]\([^)]*\)' # PMID 抽出パターン
-  DEFAULT_AUTHOR_THRESHOLD = 0 # 著者名表示の閾値 (0 は全員)
   DEFAULT_CITATION_FORMAT = '({number})'
-  DEFAULT_REFERENCE_ITEM_FORMAT = '{number}. {authors}. {title} {journal} {year};{volume}:{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)'
+  DEFAULT_REFERENCE_ITEM_FORMAT = '{number}. {authors}. {title}. {journal} {year};{volume}:{pages}. doi: {doi}. PMID: {pmid}.'
   DEFAULT_PUBMED_API_BASE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/'
   DEFAULT_API_REQUEST_DELAY = 0.4 # 3リクエスト/秒 以下
 
-  def __init__(self, pmid_regex_pattern=None, author_threshold=None, citation_format=None, ref_item_format=None, api_base_url=None, api_delay=None):
+  def __init__(self, citation_format=None, ref_item_format=None, api_base_url=None, api_delay=None):
     """
     PubMedProcessor を初期化します。
 
     Args:
       citation_format (str, optional): 本文中の引用形式。デフォルトは DEFAULT_CITATION_FORMAT。
-      pmid_regex_pattern (str, optional): PMID を抽出する正規表現パターン。デフォルトは DEFAULT_PMID_REGEX_PATTERN。
-      author_threshold (int, optional): 著者名表示の閾値 (0 は全員)。デフォルトは DEFAULT_AUTHOR_THRESHOLD。
-      citation_format (str, optional): 本文中の引用形式。デフォルトは DEFAULT_CITATION_FORMAT。
       ref_item_format (str, optional): References の各項目形式。デフォルトは DEFAULT_REFERENCE_ITEM_FORMAT。
       api_base_url (str, optional): PubMed API のベース URL。デフォルトは DEFAULT_PUBMED_API_BASE_URL。
       api_delay (float, optional): PubMed API へのリクエスト間隔 (秒)。デフォルトは DEFAULT_API_REQUEST_DELAY。
     """
-    self.pmid_regex_pattern = pmid_regex_pattern or self.DEFAULT_PMID_REGEX_PATTERN
-    self.author_threshold = author_threshold if author_threshold is not None else self.DEFAULT_AUTHOR_THRESHOLD
     self.citation_format = citation_format or self.DEFAULT_CITATION_FORMAT
     self.ref_item_format = ref_item_format or self.DEFAULT_REFERENCE_ITEM_FORMAT
     self.api_base_url = api_base_url or self.DEFAULT_PUBMED_API_BASE_URL
@@ -49,15 +41,11 @@ class PubMedProcessor:
     self.pmid_to_number_map = {}
 
   def extract_pmids(self, markdown_content):
-    """Markdown コンテンツから指定されたパターンの PMID を抽出する"""
-    try:
-      raw_pmids = re.findall(self.pmid_regex_pattern, markdown_content, flags=re.IGNORECASE)
-      # 重複を許さず、出現順を保持
-      ordered_pmids = list(OrderedDict.fromkeys(raw_pmids))
-      logging.info(f"抽出された PMID (重複除去・順序保持): {ordered_pmids}")
-    except re.error as e:
-      logging.error(f"PMID 抽出のための正規表現パターンが無効です: {self.pmid_regex_pattern} - {e}")
-      return []
+    """Markdown コンテンツから [PMID xxxxx] 形式の PMID を抽出する"""
+    raw_pmids = re.findall(r'\[PMID\s+(\d+)\]', markdown_content)
+    # 重複を許さず、出現順を保持
+    ordered_pmids = list(OrderedDict.fromkeys(raw_pmids))
+    logging.info(f"抽出された PMID (重複除去・順序保持): {ordered_pmids}")
     return ordered_pmids
 
   def fetch_pubmed_details(self, pmids):
@@ -112,11 +100,10 @@ class PubMedProcessor:
           continue
 
         authors_list = entry.get('authors', [])
-        # 著者名の整形 (閾値に基づいて)
-        if self.author_threshold > 0 and len(authors_list) > self.author_threshold:
-          authors = ', '.join([a['name'] for a in authors_list[:self.author_threshold]]) + ', et al'
-        else:
-          authors = ', '.join([author['name'] for author in authors_list])
+        authors = ', '.join([author['name'] for author in authors_list])
+        # 例: 3名まで + et al.
+        # if len(authors_list) > 3:
+        #   authors = ', '.join([a['name'] for a in authors_list[:3]]) + ', et al.'
 
         doi = ''
         articleids = entry.get('articleids', [])
@@ -127,6 +114,7 @@ class PubMedProcessor:
         # elocationid もフォールバックとしてチェック (形式が doi: XXXXX の場合)
         if not doi and entry.get('elocationid', '').startswith('doi:'):
           doi = entry.get('elocationid', '').replace('doi: ', '')
+
 
         details[pmid] = {
           'authors': authors,
@@ -166,7 +154,7 @@ class PubMedProcessor:
         number=number,
         authors=details.get('authors', 'N/A'),
         year=details.get('year', 'N/A'),
-        title=details.get('title', 'N/A'),
+        title=details.get('title', 'N/A').rstrip('. '),
         journal=details.get('journal', 'N/A'),
         volume=details.get('volume', ''),
         issue=details.get('issue', ''),
@@ -180,6 +168,7 @@ class PubMedProcessor:
     except Exception as e:
       logging.error(f"参照項目のフォーマット中に予期せぬエラーが発生しました: {e}")
       return f"{number}. [PMID {details.get('pmid', 'N/A')}] - 不明なフォーマットエラー"
+
 
   def create_references_section(self, header):
     """References セクションの Markdown 文字列を生成する"""
@@ -218,74 +207,23 @@ class PubMedProcessor:
       return 2
 
   def replace_citations(self, markdown_content):
-    """Markdown コンテンツ内の PMID 参照を指定された形式に置換する"""
+    """Markdown コンテンツ内の [PMID xxxxx] を指定された形式に置換する"""
     output_content = markdown_content
-    matches = []
-    try:
-      # finditer を使って全てのマッチオブジェクトとその位置を取得
-      for match in re.finditer(self.pmid_regex_pattern, markdown_content, re.IGNORECASE):
-        # 最初のキャプチャグループが PMID であると仮定
-        if match.groups():
-          pmid = match.group(1)
-          if pmid in self.pmid_to_number_map:
-            # マッチの開始位置、終了位置、PMID を保存
-            matches.append((match.start(), match.end(), pmid))
-        else:
-          # キャプチャグループがない場合（パターンが (\d+) を含まないなど）
-          logging.warning(f"パターン '{self.pmid_regex_pattern}' は PMID をキャプチャしませんでした。マッチ: {match.group(0)}")
-
-    except re.error as e:
-      logging.error(f"引用置換のための正規表現パターン処理中にエラーが発生しました: {e}")
-      return markdown_content # エラー時は元のコンテンツを返す
-    except Exception as e:
-      logging.error(f"引用検索中に予期せぬエラーが発生しました: {e}")
-      return markdown_content
-
-    if not matches:
-      logging.info("置換対象の引用が見つかりませんでした。")
-      return output_content
-
-    # 新しい文字列を構築するためのリスト
-    new_content_parts = []
-    last_end = 0
-    # マッチ箇所を開始位置でソート（通常 finditer は出現順に返す）
-    sorted_matches = sorted(matches, key=lambda x: x[0])
-
-    for start, end, pmid in sorted_matches:
+    for pmid, number in self.pmid_to_number_map.items():
       try:
-        # マップに PMID が存在するか再確認 (fetch で失敗した PMID は除くため)
-        if pmid in self.pmid_to_number_map:
-          number = self.pmid_to_number_map[pmid]
-          citation_replace_str = self.citation_format.format(number=number)
-          # 前回の終了位置から今回の開始位置までの部分を追加
-          new_content_parts.append(output_content[last_end:start])
-          # 置換後の文字列を追加
-          new_content_parts.append(citation_replace_str)
-          last_end = end
-        else:
-          # マップにない場合（fetch失敗など）は元のテキストを残す
-          new_content_parts.append(output_content[last_end:end])
-          last_end = end
+        citation_replace_str = self.citation_format.format(number=number)
+        # re.escape で特殊文字をエスケープ
+        output_content = re.sub(r'\[PMID\s+' + re.escape(pmid) + r'\]', citation_replace_str, output_content)
       except KeyError as e:
-        # citation_format のキーエラーなど
         logging.error(f"引用符のフォーマット中にエラーが発生しました。キー: {e}, フォーマット: {self.citation_format}")
-        # エラー時は元の部分を追加
-        new_content_parts.append(output_content[last_end:start]) # エラー発生前の部分
-        new_content_parts.append(output_content[start:end]) # エラー発生箇所（元のまま）
-        last_end = end
+        # エラーが発生した場合、元の PMID タグを残すか、エラー表示にするか選択
+        # ここでは元のタグを残す
+        pass
       except Exception as e:
         logging.error(f"引用符の置換中に予期せぬエラーが発生しました: {e}")
-        # エラー時は元の部分を追加
-        new_content_parts.append(output_content[last_end:start])
-        new_content_parts.append(output_content[start:end])
-        last_end = end
-
-    # 最後のマッチ以降の部分を追加
-    new_content_parts.append(output_content[last_end:])
-    final_output = "".join(new_content_parts)
-
+        pass
     logging.info("本文中の引用を置換しました。")
-    return final_output
+    return output_content
 
   def process_file(self, input_filepath, output_filepath):
     """Markdown ファイルを処理して引用を置換し、References を追加する"""
@@ -304,6 +242,15 @@ class PubMedProcessor:
     pmids = self.extract_pmids(content)
     if not pmids:
       logging.warning("PMID 形式の引用が見つかりませんでした。処理を終了します。")
+      # PMID がなくてもファイルコピーは行う場合
+      # try:
+      #   with open(output_filepath, 'w', encoding='utf-8') as f:
+      #     f.write(content)
+      #   logging.info(f"PMID が見つからなかったため、内容は変更せずに出力ファイルにコピーしました: {output_filepath}")
+      #   return True
+      # except Exception as e:
+      #   logging.error(f"ファイル書き込み中にエラーが発生しました - {e}")
+      #   return False
       return False # PMIDがない場合は処理しない
 
     # 2. PubMed から詳細を取得
@@ -365,35 +312,24 @@ def main():
   parser = argparse.ArgumentParser(description='Markdown ファイル内の PubMed 引用を処理し、References リストを生成・置換します。')
   parser.add_argument('input_file', nargs='?', default=None, help='処理対象の Markdown ファイルパス (省略時はダイアログ表示)')
   parser.add_argument('-o', '--output_file', help='出力先のファイルパス (指定しない場合は input_file に _cited を付与)')
-
-  # PubMedProcessor 設定の引数を追加
-  parser.add_argument('--pmid-pattern', default=PubMedProcessor.DEFAULT_PMID_REGEX_PATTERN,
-    help=textwrap.dedent(fr'''\
-    Markdown 内の PMID を抽出するための正規表現パターン。
-    PMID 自体をキャプチャグループ `(\d+)` で囲む必要があります。
-    (デフォルト: "{PubMedProcessor.DEFAULT_PMID_REGEX_PATTERN}")'''))
-  parser.add_argument('--author-threshold', type=int, default=PubMedProcessor.DEFAULT_AUTHOR_THRESHOLD,
-    help=f'References に表示する著者名の最大数。0 を指定すると全員表示します。(デフォルト: {PubMedProcessor.DEFAULT_AUTHOR_THRESHOLD})')
   parser.add_argument('--citation-format', default=PubMedProcessor.DEFAULT_CITATION_FORMAT,
-    help=f'本文中の引用形式。`{{number}}` で参照番号を挿入します。(デフォルト: "{PubMedProcessor.DEFAULT_CITATION_FORMAT}")')
+            help=f'本文中の引用形式 (デフォルト: "{PubMedProcessor.DEFAULT_CITATION_FORMAT}")')
   parser.add_argument('--ref-item-format', default=PubMedProcessor.DEFAULT_REFERENCE_ITEM_FORMAT,
-    help=textwrap.dedent(f'''\
-    References の各項目形式。以下のプレースホルダーを使用できます:
-    {{number}}, {{authors}}, {{title}}, {{journal}}, {{year}}, {{volume}}, {{issue}}, {{pages}}, {{doi}}, {{pmid}}
-    (デフォルト: "{PubMedProcessor.DEFAULT_REFERENCE_ITEM_FORMAT}")'''))
+            help=f'References の各項目形式 (デフォルト: "{PubMedProcessor.DEFAULT_REFERENCE_ITEM_FORMAT}")')
   parser.add_argument('--api-delay', type=float, default=PubMedProcessor.DEFAULT_API_REQUEST_DELAY,
-    help=f'PubMed API へのリクエスト間隔 (秒) (デフォルト: {PubMedProcessor.DEFAULT_API_REQUEST_DELAY})')
+            help=f'PubMed API へのリクエスト間隔 (秒) (デフォルト: {PubMedProcessor.DEFAULT_API_REQUEST_DELAY})')
   parser.add_argument('--api-base-url', default=PubMedProcessor.DEFAULT_PUBMED_API_BASE_URL,
-    help=f'PubMed API のベース URL (デフォルト: {PubMedProcessor.DEFAULT_PUBMED_API_BASE_URL})')
+            help=f'PubMed API のベース URL (デフォルト: {PubMedProcessor.DEFAULT_PUBMED_API_BASE_URL})')
 
   args = parser.parse_args()
+
   input_filepath = args.input_file
   if input_filepath is None:
     logging.info("入力ファイルが指定されていません。ファイル選択ダイアログを開きます。")
     input_filepath = ask_for_file(title="処理する Markdown ファイルを選択してください")
     if input_filepath is None:
       logging.error("入力ファイルが選択されなかったため、処理をキャンセルしました。")
-      return
+      return # または exit(1)
 
   output_filepath = args.output_file
   if not output_filepath:
@@ -405,10 +341,8 @@ def main():
       logging.error("入力ファイルパスが不明なため、出力ファイル名を決定できません。")
       return
 
-  # PubMedProcessor インスタンスを作成 (新しい引数を追加)
+  # PubMedProcessor インスタンスを作成
   processor = PubMedProcessor(
-    pmid_regex_pattern=args.pmid_pattern,
-    author_threshold=args.author_threshold,
     citation_format=args.citation_format,
     ref_item_format=args.ref_item_format,
     api_base_url=args.api_base_url,
@@ -417,6 +351,7 @@ def main():
 
   # ファイル処理を実行
   success = processor.process_file(input_filepath, output_filepath)
+
   if success:
     logging.info("処理が正常に完了しました。")
   else:
