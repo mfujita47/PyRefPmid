@@ -1,4 +1,4 @@
-# PyRefPmid: Markdown PubMed Referencer
+# PyRefPmid: Markdown PubMed Referencer (v1.0.0)
 
 `PyRefPmid.py` は、Markdown ファイル内に記述された PubMed ID (PMID) を検出し、PubMed API を利用して論文情報を取得し、整形された参考文献リスト (References) を自動生成・追記する Python スクリプトです。
 
@@ -15,6 +15,7 @@
 *   **フォーマットカスタマイズ**: 引用形式、参考文献リストの各項目の表示形式、表示する著者数などをコマンドライン引数でカスタマイズできます。
 *   **ヘッダーレベル調整**: `References` セクションのヘッダーレベル (`#` の数) を、本文中の他の主要セクションに合わせて自動調整します。
 *   **ファイル選択**: 入力ファイルを指定しない場合、ファイル選択ダイアログが表示されます。
+*   **キャッシュ機能**: 一度取得した論文情報はローカルにキャッシュし、次回以降の実行時に API への問い合わせを減らして高速化します。キャッシュはデフォルトで有効です。
 
 ## 必要なもの
 
@@ -29,25 +30,32 @@ pip install requests
 
 ## 使用方法
 
-### 基本的な使い方
+`PyRefPmid.py` は、コマンドラインから直接実行できます。
 
-コマンドラインで以下のように実行します。
-
-```bash
-python PyRefPmid.py <入力Markdownファイル名> [オプション]
-```
-
-例えば、`mydocument.md` を処理し、結果を `mydocument_cited.md` に保存する場合:
-
-```bash
-python PyRefPmid.py mydocument.md
-```
-
-入力ファイルを指定せずに実行すると、ファイル選択ダイアログが開きます。
+**最も簡単な使い方は、スクリプトを引数なしで実行することです:**
 
 ```bash
 python PyRefPmid.py
 ```
+
+上記のように実行すると、処理対象の Markdown ファイルを選択するためのダイアログが表示されます。ファイルを選択すると、処理が実行され、結果は入力ファイルと同じディレクトリに `元のファイル名_cited.md` という名前で保存されます。
+
+**より詳細な制御を行いたい場合は、コマンドライン引数を利用できます:**
+
+コマンドラインで以下のように入力ファイル名やオプションを指定して実行します。
+
+```bash
+python PyRefPmid.py [入力Markdownファイル名] [オプション]
+```
+
+*   **入力ファイル名を指定する場合**:
+    ```bash
+    python PyRefPmid.py mydocument.md
+    ```
+    この場合、`mydocument.md` を処理し、結果は `mydocument_cited.md` に保存されます。
+
+*   **オプションを指定する場合**:
+    出力ファイル名や処理方法を細かく制御できます。詳細は後述の「コマンドライン引数」セクションを参照してください。
 
 ### 原稿ファイル内での引用方法
 
@@ -98,7 +106,7 @@ Markdown 原稿ファイル内で PubMed の文献を引用するには、デフ
 *   **`--ref-item-format REF_ITEM_FORMAT`**
     *   **説明**: 参考文献リストの各項目の表示形式テンプレート。
     *   **利用可能なプレースホルダー**: `{number}`, `{authors}`, `{title}`, `{journal}`, `{year}`, `{volume}`, `{issue}`, `{pages}`, `{doi}`, `{pmid}`
-    *   **デフォルト**: `'{number}. {authors}. {title}. {journal} {year};{volume}:{pages}. doi: {doi}. PMID: {pmid}.'`
+    *   **デフォルト**: `'{number}. {authors}. {title}. {journal} {year};{volume}:{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)'`
 
 *   **`--api-delay API_DELAY`**
     *   **説明**: PubMed API へのリクエスト間の待機時間 (秒)。NCBI の利用規約を遵守するため。
@@ -107,6 +115,14 @@ Markdown 原稿ファイル内で PubMed の文献を引用するには、デフ
 *   **`--api-base-url API_BASE_URL`**
     *   **説明**: PubMed API のベース URL。通常は変更不要です。
     *   **デフォルト**: `'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/'`
+
+*   **`--cache-file CACHE_FILE`**
+    *   **説明**: 論文情報のキャッシュに使用する JSON ファイルのパス。
+    *   **デフォルト**: OS の一時ディレクトリ内の `.pubmed_cache.json`。
+
+*   **`--no-cache`**
+    *   **説明**: キャッシュ機能を使用しません。常に API から最新情報を取得します。
+    *   **デフォルト**: キャッシュを使用します。
 
 ### 使用例
 
@@ -120,3 +136,17 @@ python PyRefPmid.py report.md --author-threshold 3 --citation-format "[{number}]
 
 *   PubMed API の利用には制限があります。`--api-delay` を適切に設定してください（デフォルト値は NCBI のガイドラインに基づいています）。
 *   存在しない PMID や取得に失敗した PMID については、参考文献リストにエラーメッセージが表示されます。
+*   **キャッシュファイル**:
+    *   デフォルトでは、キャッシュファイルは OS の一時ディレクトリ (例: Windows の `C:\Users\<ユーザー名>\AppData\Local\Temp`、Linux の `/tmp` など) に `.pubmed_cache.json` という名前で作成されます。
+    *   キャッシュをクリアしたい場合は、このファイルを削除してください。
+    *   `--cache-file` 引数でキャッシュファイルの場所を指定できます。
+    *   `--no-cache` 引数でキャッシュの使用を一時的に無効にできます。
+
+## ライセンス
+
+このプロジェクトは [MIT License](LICENSE) のもとで公開されています。
+詳細については、`LICENSE` ファイルを参照してください。
+
+## 変更履歴
+
+このプロジェクトの主な変更点については、[CHANGELOG.md](CHANGELOG.md) を参照してください。
