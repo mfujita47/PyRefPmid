@@ -84,3 +84,4 @@ Desktop.ini
 
 # Old script versions found in PyRef/
 PyRefPmid b*.py
+CHANGELOG b*.md
