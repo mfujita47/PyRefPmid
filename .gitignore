@@ -83,5 +83,4 @@ Desktop.ini
 *.tmp
 
 # Old script versions found in PyRef/
-# Uncomment the lines below if you want to ignore these specific files from version control:
 PyRefPmid b*.py
