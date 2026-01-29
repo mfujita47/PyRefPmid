@@ -5,9 +5,34 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [1.1.0] - 2026-01-29
+
+### 追加
+
+- 設定を一元管理する `Config` クラスを追加。
+- 論文データを構造化して扱うための `ArticleMetadata` データクラスを追加。
+- ネットワーク通信の安定性を向上させるため、API リクエストにタイムアウト設定を追加。
+
+### 変更
+
+- `PyRefPmid.py` を単一ファイル内でモジュール化し、責任範囲（API通信、キャッシュ、解析、整形）ごとにクラスを分割：
+  - `PubMedClient`
+  - `CacheManager`
+  - `CitationParser`
+  - `ReferenceFormatter`
+  - `PubMedProcessor`
+- `PubMedProcessor` を `argparse` から疎結合にし、他のスクリプトからの再利用性を向上。
+- 不要なインポートを削除し、コードベースを整理。
+- `ask_for_file` ユーティリティ関数を `main` 関数の近くに移動し、構成を整理。
+
+### 修正
+
+- 辞書型のデータ構造をデータクラスに置き換えることで、タイプミスによる実行時エラーのリスクを低減。
+
 ## [1.0.0] - 2025-05-22
 
 ### 追加
+
 - PubMed API レスポンスのキャッシュメカニズムを追加。コマンドライン引数 (`--cache-file`, `--no-cache`) で設定可能。
 - キャッシュファイルのパス指定とキャッシュ無効化のためのコマンドライン引数を追加。
 - `LICENSE` ファイル (MIT ライセンス) を追加。
@@ -17,23 +42,27 @@
 - `black` を使用してコードフォーマットを適用。
 
 ### 変更
+
 - 可読性、保守性、パフォーマンスを向上させるため、`PyRefPmid.py` スクリプトを大幅にリファクタリング。
 - 引用処理を最適化:
-    - `extract_pmid_groups` が各 PMID グループのスパン情報を返すように変更。
-    - `replace_citations` を更新し、このスパン情報を使用してテキスト内引用をより正確かつ効率的に置換するように変更。
+  - `extract_pmid_groups` が各 PMID グループのスパン情報を返すように変更。
+  - `replace_citations` を更新し、このスパン情報を使用してテキスト内引用をより正確かつ効率的に置換するように変更。
 - `PubMedProcessor.process_file` メソッドのシグネチャを更新し、`Path` オブジェクトを受け入れるように変更。
 - デフォルトの参考文献アイテム形式 (`DEFAULT_REFERENCE_ITEM_FORMAT`) を更新し、クリック可能な PubMed リンクを含むように変更: `[{pubmed_id}](https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/)`。
 - `README.md` を更新し、詳細な使用方法、キャッシュに関する情報、コマンドライン引数、ライセンス、および変更履歴へのリンクを追加。
 
 ### 削除
+
 - 冗長な `extract_pmids` メソッドを削除。その機能は `extract_pmid_groups` に統合。
 
 ### 修正
+
 - 内部的にファイルパスに対して `Path` オブジェクトを一貫して使用するように修正。
 
 ## [0.1.0] - 2025-03-14
 
 ### 追加
+
 - `PyRefPmid` の初期リリース。
 - 正規表現を使用して Markdown ファイルから PMID を抽出する機能を追加。
 - PubMed API (Entrez) から出版詳細 (タイトル、著者、ジャーナル、年、DOI) を取得する機能を追加。

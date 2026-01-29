@@ -4,10 +4,10 @@ import json
 import logging
 import re
 import tempfile
+import textwrap
 import time
-from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import requests
 
@@ -33,49 +33,11 @@ class Config:
     # API設定
     API_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
     API_REQUEST_DELAY = 0.4
-    API_KEY = ""
-    API_TIMEOUT = 10.0  # 秒
+    API_KEY = "3a88fc215344206ea89f04981d824c4ca608"
 
     # キャッシュ設定
     CACHE_FILENAME = "pyrefpmid_cache.json"
     USE_CACHE = True
-
-
-# --- データクラス ---
-@dataclass
-class ArticleMetadata:
-    """論文のメタデータを表すデータクラス"""
-    pmid: str
-    title: str = "N/A"
-    authors_list: List[str] = field(default_factory=list)
-    journal: str = "N/A"
-    year: str = ""
-    volume: str = ""
-    issue: str = ""
-    pages: str = ""
-    doi: str = ""
-    error: Optional[str] = None
-
-    @property
-    def is_valid(self) -> bool:
-        return self.error is None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ArticleMetadata':
-        """辞書からインスタンスを生成（不要なキーは無視）"""
-        # クラス定義にあるフィールドのみを抽出
-        known_keys = cls.__annotations__.keys()
-        filtered_data = {k: v for k, v in data.items() if k in known_keys}
-
-        # authors_list の型チェック兼変換（古いキャッシュ対策）
-        if "authors_list" in filtered_data:
-            if not isinstance(filtered_data["authors_list"], list):
-                 filtered_data["authors_list"] = [] # または適切な変換
-
-        return cls(**filtered_data)
 
 
 # --- 主要クラス ---
@@ -88,25 +50,22 @@ class PubMedClient:
         api_base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         api_delay: Optional[float] = None,
-        timeout: float = Config.API_TIMEOUT,
     ):
         self.api_base_url = api_base_url or Config.API_BASE_URL
         self.api_key = api_key
-        # APIキーがある場合は遅延を短縮
         if self.api_key:
             self.api_delay = 0.1
         else:
             self.api_delay = api_delay or Config.API_REQUEST_DELAY
-        self.timeout = timeout
 
-    def fetch_details(self, pmids: List[str]) -> Tuple[Dict[str, ArticleMetadata], List[str]]:
+    def fetch_details(self, pmids: List[str]) -> Tuple[Dict[str, Any], List[str]]:
         """指定された PMID リストの詳細を PubMed API から取得する"""
         if not pmids:
             return {}, []
 
         chunk_size = 100
-        api_details: Dict[str, ArticleMetadata] = {}
-        api_not_found: List[str] = []
+        api_details = {}
+        api_not_found = []
 
         logging.info("API で取得する PMID (%s件): %s", len(pmids), pmids)
 
@@ -125,7 +84,7 @@ class PubMedClient:
             )
 
             try:
-                response = requests.get(url, timeout=self.timeout)
+                response = requests.get(url)
                 response.raise_for_status()
                 data = response.json()
                 results = data.get("result")
@@ -134,7 +93,7 @@ class PubMedClient:
                     logging.warning("PubMed API から有効な結果が得られませんでした (Chunk)。")
                     api_not_found.extend(chunk)
                     for pmid in chunk:
-                        api_details[pmid] = ArticleMetadata(pmid=pmid, error="Not found in API response")
+                        api_details[pmid] = {"error": "Not found in API response"}
                     continue
 
                 returned_uids = results.get("uids", [])
@@ -146,12 +105,12 @@ class PubMedClient:
                 logging.error("PubMed API への接続に失敗しました - %s", e)
                 api_not_found.extend(chunk)
                 for pmid in chunk:
-                    api_details[pmid] = ArticleMetadata(pmid=pmid, error=f"API connection failed: {e}")
+                    api_details[pmid] = {"error": f"API connection failed: {e}"}
             except Exception as e:
                 logging.error("PubMed API データ処理中に予期せぬエラーが発生しました - %s", e)
                 api_not_found.extend(chunk)
                 for pmid in chunk:
-                    api_details[pmid] = ArticleMetadata(pmid=pmid, error=f"Unexpected error: {e}")
+                    api_details[pmid] = {"error": f"Unexpected error: {e}"}
 
             if i + chunk_size < len(pmids):
                 time.sleep(self.api_delay)
@@ -163,7 +122,7 @@ class PubMedClient:
         requested_pmids: List[str],
         returned_uids: List[str],
         results: Dict,
-        api_details: Dict[str, ArticleMetadata],
+        api_details: Dict,
         api_not_found: List[str],
     ):
         """APIの結果を解析して詳細情報を抽出する"""
@@ -175,7 +134,7 @@ class PubMedClient:
             logging.warning("API レスポンスに以下の PMID が含まれていません: %s", missing)
             api_not_found.extend(missing)
             for pmid in missing:
-                api_details[pmid] = ArticleMetadata(pmid=pmid, error="Not found in API response")
+                api_details[pmid] = {"error": "Not found in API response"}
 
         for pmid in returned_uids:
             if pmid not in results:
@@ -186,12 +145,12 @@ class PubMedClient:
                 logging.warning("PMID %s の詳細取得で API エラー: %s", pmid, entry["error"])
                 if pmid not in api_not_found:
                     api_not_found.append(pmid)
-                api_details[pmid] = ArticleMetadata(pmid=pmid, error=entry["error"])
+                api_details[pmid] = entry
                 continue
 
             api_details[pmid] = self._extract_entry_data(pmid, entry)
 
-    def _extract_entry_data(self, pmid: str, entry: Dict) -> ArticleMetadata:
+    def _extract_entry_data(self, pmid: str, entry: Dict) -> Dict[str, Any]:
         """個々のエントリから必要なデータを抽出する"""
         authors_list = entry.get("authors", [])
         author_names = [a.get("name", "N/A") for a in authors_list]
@@ -208,17 +167,17 @@ class PubMedClient:
         if not doi and entry.get("elocationid", "").startswith("doi:"):
             doi = entry.get("elocationid", "").replace("doi: ", "")
 
-        return ArticleMetadata(
-            pmid=pmid,
-            title=entry.get("title", "N/A"),
-            authors_list=author_names,
-            year=entry.get("pubdate", "").split(" ")[0],
-            journal=entry.get("source", "N/A"),
-            volume=entry.get("volume", ""),
-            issue=entry.get("issue", ""),
-            pages=entry.get("pages", ""),
-            doi=doi
-        )
+        return {
+            "authors_list": author_names,
+            "year": entry.get("pubdate", "").split(" ")[0],
+            "title": entry.get("title", "N/A"),
+            "journal": entry.get("source", "N/A"),
+            "volume": entry.get("volume", ""),
+            "issue": entry.get("issue", ""),
+            "pages": entry.get("pages", ""),
+            "pmid": pmid,
+            "doi": doi,
+        }
 
 
 class CacheManager:
@@ -226,11 +185,11 @@ class CacheManager:
 
     def __init__(
         self,
-        cache_file: Optional[Union[str, Path]] = None,
+        cache_file: Optional[str | Path] = None,
         use_cache: bool = True,
     ):
         self.use_cache = use_cache
-        self.cache_data: Dict[str, ArticleMetadata] = {}
+        self.cache_data = {}
         self.cache_file: Optional[Path] = None
 
         if not self.use_cache:
@@ -269,15 +228,7 @@ class CacheManager:
 
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-
-            for pmid, item in raw_data.items():
-                try:
-                    meta = ArticleMetadata.from_dict(item)
-                    self.cache_data[pmid] = meta
-                except Exception:
-                    logging.warning(f"キャッシュアイテムの読み込みスキップ: {pmid}")
-
+                self.cache_data = json.load(f)
             logging.info("キャッシュファイルを読み込みました: %s", self.cache_file)
         except Exception as e:
             logging.error("キャッシュ読み込みエラー (%s): %s", self.cache_file, e)
@@ -289,19 +240,13 @@ class CacheManager:
             return
 
         try:
-            # ArticleMetadata オブジェクトを辞書に変換して保存
-            serializable_data = {
-                pmid: meta.to_dict()
-                for pmid, meta in self.cache_data.items()
-            }
-
             with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(serializable_data, f, ensure_ascii=False, indent=2)
+                json.dump(self.cache_data, f, ensure_ascii=False, indent=2)
             logging.info("キャッシュを保存しました: %s", self.cache_file)
         except Exception as e:
             logging.error("キャッシュ保存エラー (%s): %s", self.cache_file, e)
 
-    def get_details(self, pmids: List[str]) -> Tuple[Dict[str, ArticleMetadata], List[str]]:
+    def get_details(self, pmids: List[str]) -> Tuple[Dict[str, Any], List[str]]:
         """キャッシュから詳細を取得する"""
         found = {}
         not_found = []
@@ -312,25 +257,17 @@ class CacheManager:
         for pmid in pmids:
             item = self.cache_data.get(pmid)
             if item:
-                # エラーがなく、かつ著者リストが空（不完全なキャッシュ）の場合は再取得対象とするか検討
-                # 今回は ArticleMetadata で構造化されているので、authors_list が存在することは保証される。
-                # ただし、過去のキャッシュで authors_list が空リストになっている可能性がある。
-                # ここでは単純に error がなければヒットとみなす。
-                if item.is_valid:
-                     found[pmid] = item
+                # 著者リストがない場合は再取得対象（古いキャッシュ形式対応）
+                if "error" not in item and "authors_list" not in item:
+                    not_found.append(pmid)
                 else:
-                    # エラーとしてキャッシュされている場合も、再試行させるか？
-                    # 今回はキャッシュヒット（エラー情報）として返す
                     found[pmid] = item
             else:
                 not_found.append(pmid)
 
-        # authors_list のチェックを厳密に行いたい場合（古いキャッシュ形式からの移行時など）
-        # 別途再取得ロジックを入れることも可能だが、ArticleMetadata.from_dict で吸収していると仮定
-
         return found, not_found
 
-    def update(self, new_details: Dict[str, ArticleMetadata]):
+    def update(self, new_details: Dict[str, Any]):
         """キャッシュを更新する"""
         if self.use_cache:
             self.cache_data.update(new_details)
@@ -478,26 +415,25 @@ class ReferenceFormatter:
         new_parts.append(content[last_end:])
         return "".join(new_parts)
 
-    def create_section(self, pmid_map: Dict[str, int], details_map: Dict[str, ArticleMetadata], header: str) -> str:
+    def create_section(self, pmid_map: Dict[str, int], details_map: Dict[str, Any], header: str) -> str:
         """References セクションを作成する"""
         if not details_map:
             return ""
 
         items = []
         for pmid, number in pmid_map.items():
-            meta = details_map.get(pmid)
-            if meta and meta.is_valid:
+            details = details_map.get(pmid)
+            if details and "error" not in details:
                 # 整形時に動的に著者名を生成（thresholdを適用）
-                details_dict = meta.to_dict()
-                details_dict["authors"] = self._format_authors(meta.authors_list)
+                details_copy = details.copy()
+                details_copy["authors"] = self._format_authors(details.get("authors_list", []))
 
                 try:
-                    items.append(self.ref_item_format.format(number=number, **details_dict))
+                    items.append(self.ref_item_format.format(number=number, **details_copy))
                 except Exception:
                     items.append(f"{number}. [PMID {pmid}] - Format Error")
             else:
-                reason = meta.error if meta else "Load Error"
-                items.append(f"{number}. [PMID {pmid}] - Get Error ({reason})")
+                 items.append(f"{number}. [PMID {pmid}] - Load Error")
 
         if not items:
             return ""
@@ -507,35 +443,24 @@ class ReferenceFormatter:
 class PubMedProcessor:
     """各コンポーネントを統合して処理を実行するクラス"""
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        api_delay: Optional[float] = None,
-        cache_file: Optional[Union[str, Path]] = None,
-        use_cache: bool = True,
-        pmid_regex: Optional[str] = None,
-        references_header: Optional[str] = None,
-        citation_format: Optional[str] = None,
-        ref_item_format: Optional[str] = None,
-        author_threshold: int = 0
-    ):
-        # 依存注入をより明確にするため、個別の管理クラスを初期化
+    def __init__(self, args):
+        self.args = args
         self.client = PubMedClient(
-            api_key=api_key,
-            api_delay=api_delay
+            api_key=args.api_key,
+            api_delay=args.api_delay
         )
         self.cache = CacheManager(
-            cache_file=cache_file,
-            use_cache=use_cache
+            cache_file=args.cache_file,
+            use_cache=args.use_cache
         )
         self.parser = CitationParser(
-            pmid_regex_pattern=pmid_regex,
-            references_header=references_header
+            pmid_regex_pattern=args.pmid_regex,
+            references_header=args.references_header
         )
         self.formatter = ReferenceFormatter(
-            citation_format=citation_format,
-            ref_item_format=ref_item_format,
-            author_threshold=author_threshold
+            citation_format=args.citation_format,
+            ref_item_format=args.ref_item_format,
+            author_threshold=args.author_threshold
         )
 
     def process_file(self, input_path: Path, output_path: Path) -> bool:
@@ -561,10 +486,7 @@ class PubMedProcessor:
 
         # 統合
         final_details = {**cached_details, **api_details}
-
-        # 新規取得分をキャッシュへ保存
-        if api_details:
-             self.cache.update(api_details)
+        self.cache.update(api_details)
 
         # 3. 本文置換
         new_content = self.formatter.replace_citations(content, pmid_groups, pmid_map)
@@ -611,6 +533,7 @@ class PubMedProcessor:
                 logging.info("References セクションを追加")
                 return content.rstrip() + "\n\n" + ref_section
             return content
+
 
 
 # --- ファイル選択ダイアログ関数 ---
@@ -678,18 +601,8 @@ def main():
     if not output_path.parent.exists():
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 実行: 引数を分解して渡す
-    processor = PubMedProcessor(
-        api_key=args.api_key,
-        api_delay=args.api_delay,
-        cache_file=args.cache_file,
-        use_cache=args.use_cache,
-        pmid_regex=args.pmid_regex,
-        references_header=args.references_header,
-        citation_format=args.citation_format,
-        ref_item_format=args.ref_item_format,
-        author_threshold=args.author_threshold
-    )
+    # 実行
+    processor = PubMedProcessor(args)
     processor.process_file(input_path, output_path)
 
 if __name__ == "__main__":
