@@ -5,6 +5,19 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [2.1.0] - 2026-02-03
+
+### 変更
+
+- **設定管理の一元化**:
+  - `GlobalSettings` データクラスをデフォルト値の唯一の定義場所とし、`DEFAULT_SETTINGS` はそこから自動生成。
+  - `parse_args` と `main` での冗長な `or DEFAULT_SETTINGS[...]` パターンを削除。
+- **コードの簡潔化**:
+  - ネストした `if` 文を統合。
+  - 重複した `.get()` 呼び出しを変数化。
+- **構造の改善**:
+  - `GlobalSettings` をスクリプト上部に移動し、設定変更を容易化。
+
 ## [2.0.0] - 2026-02-03
 
 ### 追加

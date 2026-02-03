@@ -14,7 +14,7 @@ Requirements:
 """
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __author__ = "mfujita47 (Mitsugu Fujita)"
 
 import argparse
@@ -24,7 +24,7 @@ import re
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -36,22 +36,35 @@ except ImportError:
     sys.exit(1)
 
 # =============================================================================
-# Default Settings & Constants
+# Default Settings
 # =============================================================================
 
-DEFAULT_SETTINGS = {
-    "pmid_regex_pattern": r"(?i)\[pm(?:id)?:?\s*(\d+)\](?:\([^)]*\))?",
-    "author_threshold": 0,
-    "citation_format": "({number})",
-    "author_name_format": "{last} {initials}",
-    "reference_item_format": "{number}. {authors}. {title} {journal} {year};{volume}({issue}):{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)",
-    "references_header": "References",
-    "api_base_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
-    "api_key": "3a88fc215344206ea89f04981d824c4ca608",
-    "api_timeout": 10.0,
-    "max_workers": 5,
-    "use_cache": True,
+
+@dataclass(frozen=True)
+class GlobalSettings:
+    """グローバル設定"""
+
+    pmid_regex_pattern: str = r"(?i)\[pm(?:id)?:?\s*(\d+)\](?:\([^)]*\))?"
+    author_threshold: int = 0
+    citation_format: str = "({number})"
+    author_name_format: str = "{last} {initials}"
+    reference_item_format: str = "{number}. {authors}. {title} {journal} {year};{volume}({issue}):{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
+    references_header: str = "References"
+    api_base_url: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    api_key: str | None = "3a88fc215344206ea89f04981d824c4ca608"
+    api_timeout: float = 10.0
+    max_workers: int = 5
+    use_cache: bool = True
+
+
+# GlobalSettings から DEFAULT_SETTINGS を自動生成
+DEFAULT_SETTINGS: dict[str, Any] = {
+    f.name: f.default for f in fields(GlobalSettings) if f.default is not MISSING
 }
+
+# =============================================================================
+# Type Aliases
+# =============================================================================
 
 PMID = str
 MetaDict = dict[str, Any]
@@ -85,27 +98,9 @@ class ArticleMetadata:
         """辞書からインスタンスを生成"""
         known_keys = cls.__annotations__.keys()
         filtered_data = {k: v for k, v in data.items() if k in known_keys}
-        if "authors_list" in filtered_data:
-            if not isinstance(filtered_data["authors_list"], list):
-                filtered_data["authors_list"] = []
+        if "authors_list" in filtered_data and not isinstance(filtered_data["authors_list"], list):
+            filtered_data["authors_list"] = []
         return cls(**filtered_data)
-
-
-@dataclass(frozen=True)
-class GlobalSettings:
-    """グローバル設定"""
-
-    pmid_regex_pattern: str = DEFAULT_SETTINGS["pmid_regex_pattern"]  # type: ignore
-    author_threshold: int = DEFAULT_SETTINGS["author_threshold"]  # type: ignore
-    citation_format: str = DEFAULT_SETTINGS["citation_format"]  # type: ignore
-    reference_item_format: str = DEFAULT_SETTINGS["reference_item_format"]  # type: ignore
-    author_name_format: str = DEFAULT_SETTINGS["author_name_format"]  # type: ignore
-    references_header: str = DEFAULT_SETTINGS["references_header"]  # type: ignore
-    api_base_url: str = DEFAULT_SETTINGS["api_base_url"]  # type: ignore
-    api_key: str | None = DEFAULT_SETTINGS["api_key"]  # type: ignore
-    api_timeout: float = DEFAULT_SETTINGS["api_timeout"]  # type: ignore
-    max_workers: int = DEFAULT_SETTINGS["max_workers"]  # type: ignore
-    use_cache: bool = DEFAULT_SETTINGS["use_cache"]  # type: ignore
 
 
 # =============================================================================
@@ -198,8 +193,9 @@ class PubMedClient:
             if aid.get("idtype") == "doi":
                 doi = aid.get("value", "")
                 break
-        if not doi and item.get("elocationid", "").startswith("doi:"):
-            doi = item.get("elocationid", "").replace("doi: ", "")
+        elocationid = item.get("elocationid", "")
+        if not doi and elocationid.startswith("doi:"):
+            doi = elocationid.replace("doi: ", "")
 
         authors = [a.get("name", "") for a in item.get("authors", []) if "name" in a]
 
@@ -696,20 +692,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input_file", nargs="?", help="Input Markdown file path")
     parser.add_argument("-o", "--output-file", help="Output file path")
 
-    # Settings overrides
-    parser.add_argument("--pmid-regex", default=None)
-    parser.add_argument("--author-threshold", type=int, default=None)
-    parser.add_argument("--citation-format", default=None)
-    parser.add_argument("--ref-item-format", default=None)
+    # Settings overrides (defaults from DEFAULT_SETTINGS)
+    parser.add_argument("--pmid-regex", default=DEFAULT_SETTINGS["pmid_regex_pattern"])
+    parser.add_argument("--author-threshold", type=int, default=DEFAULT_SETTINGS["author_threshold"])
+    parser.add_argument("--citation-format", default=DEFAULT_SETTINGS["citation_format"])
+    parser.add_argument("--ref-item-format", default=DEFAULT_SETTINGS["reference_item_format"])
     parser.add_argument(
         "--author-name-format",
-        default=None,
+        default=DEFAULT_SETTINGS["author_name_format"],
         help="Format for author names (e.g. '{last}, {initials}')",
     )
-    parser.add_argument("--api-key", default=None)
-    parser.add_argument("--references-header", default=None)
+    parser.add_argument("--api-key", default=DEFAULT_SETTINGS["api_key"])
+    parser.add_argument("--references-header", default=DEFAULT_SETTINGS["references_header"])
     parser.add_argument("--cache-file", default=None)
-    parser.add_argument("--max-workers", type=int, default=None, help="Max parallel threads")
+    parser.add_argument("--max-workers", type=int, default=DEFAULT_SETTINGS["max_workers"], help="Max parallel threads")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching")
 
     return parser.parse_args()
@@ -741,18 +737,16 @@ def main() -> int:
     else:
         output_path = input_path.with_name(f"{input_path.stem}_cited{input_path.suffix}")
 
-    # Build Settings - apply CLI overrides to defaults
+    # Build Settings - args already contain defaults from argparse
     settings = GlobalSettings(
-        pmid_regex_pattern=args.pmid_regex or DEFAULT_SETTINGS["pmid_regex_pattern"],
-        author_threshold=args.author_threshold if args.author_threshold is not None else DEFAULT_SETTINGS["author_threshold"],
-        citation_format=args.citation_format or DEFAULT_SETTINGS["citation_format"],
-        reference_item_format=args.ref_item_format or DEFAULT_SETTINGS["reference_item_format"],
-        author_name_format=args.author_name_format or DEFAULT_SETTINGS["author_name_format"],
-        references_header=args.references_header or DEFAULT_SETTINGS["references_header"],
-        api_base_url=DEFAULT_SETTINGS["api_base_url"],
-        api_key=args.api_key or DEFAULT_SETTINGS["api_key"],
-        api_timeout=DEFAULT_SETTINGS["api_timeout"],
-        max_workers=args.max_workers if args.max_workers is not None else DEFAULT_SETTINGS["max_workers"],
+        pmid_regex_pattern=args.pmid_regex,
+        author_threshold=args.author_threshold,
+        citation_format=args.citation_format,
+        reference_item_format=args.ref_item_format,
+        author_name_format=args.author_name_format,
+        references_header=args.references_header,
+        api_key=args.api_key,
+        max_workers=args.max_workers,
         use_cache=not args.no_cache,
     )
 
