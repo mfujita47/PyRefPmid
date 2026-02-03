@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PyRefPmid - Markdown PubMed Referencer
+PyRefPmid - Markdown PubMed Referencer (Hybrid)
 
 Description:
     Markdown ファイル内に記述された PubMed ID (PMID) を検出し、
@@ -14,20 +14,26 @@ Requirements:
 """
 from __future__ import annotations
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 __author__ = "mfujita47 (Mitsugu Fujita)"
 
 import argparse
+import concurrent.futures
 import json
 import re
 import sys
-import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
-import requests
+# 外部ライブラリチェック
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' library is missing. Please install it via 'pip install requests'.")
+    sys.exit(1)
 
 # =============================================================================
 # Default Settings & Constants
@@ -38,42 +44,21 @@ DEFAULT_SETTINGS = {
     "author_threshold": 0,
     "citation_format": "({number})",
     "author_name_format": "{last} {initials}",
-    "reference_item_format": "{number}. {authors}. {title} {journal} {year};{volume}:{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)",
+    "reference_item_format": "{number}. {authors}. {title} {journal} {year};{volume}({issue}):{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)",
     "references_header": "References",
-    "api_base_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/",
-    "api_request_delay": 0.4,
-    "api_key": None,
+    "api_base_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+    "api_key": "3a88fc215344206ea89f04981d824c4ca608",
     "api_timeout": 10.0,
+    "max_workers": 5,
     "use_cache": True,
 }
 
-# =============================================================================
-# Type Aliases
-# =============================================================================
-PMID: TypeAlias = str
-MetaDict: TypeAlias = dict[str, Any]
-
+PMID = str
+MetaDict = dict[str, Any]
 
 # =============================================================================
 # Data Models
 # =============================================================================
-
-
-@dataclass(frozen=True)
-class GlobalSettings:
-    """グローバル設定"""
-
-    pmid_regex_pattern: str = DEFAULT_SETTINGS["pmid_regex_pattern"]  # type: ignore
-    author_threshold: int = DEFAULT_SETTINGS["author_threshold"]  # type: ignore
-    citation_format: str = DEFAULT_SETTINGS["citation_format"]  # type: ignore
-    reference_item_format: str = DEFAULT_SETTINGS["reference_item_format"]  # type: ignore
-    author_name_format: str = DEFAULT_SETTINGS["author_name_format"] # type: ignore
-    references_header: str = DEFAULT_SETTINGS["references_header"]  # type: ignore
-    api_base_url: str = DEFAULT_SETTINGS["api_base_url"]  # type: ignore
-    api_request_delay: float = DEFAULT_SETTINGS["api_request_delay"]  # type: ignore
-    api_key: str | None = DEFAULT_SETTINGS["api_key"]  # type: ignore
-    api_timeout: float = DEFAULT_SETTINGS["api_timeout"]  # type: ignore
-    use_cache: bool = DEFAULT_SETTINGS["use_cache"]  # type: ignore
 
 
 @dataclass
@@ -95,22 +80,55 @@ class ArticleMetadata:
     def is_valid(self) -> bool:
         return self.error is None
 
-    def to_dict(self) -> MetaDict:
-        return asdict(self)
-
     @classmethod
     def from_dict(cls, data: MetaDict) -> ArticleMetadata:
-        """辞書からインスタンスを生成（不要なキーは無視）"""
-        # クラス定義にあるフィールドのみを抽出
+        """辞書からインスタンスを生成"""
         known_keys = cls.__annotations__.keys()
         filtered_data = {k: v for k, v in data.items() if k in known_keys}
-
-        # authors_list の型チェック兼変換
         if "authors_list" in filtered_data:
             if not isinstance(filtered_data["authors_list"], list):
                 filtered_data["authors_list"] = []
-
         return cls(**filtered_data)
+
+
+@dataclass(frozen=True)
+class GlobalSettings:
+    """グローバル設定"""
+
+    pmid_regex_pattern: str = DEFAULT_SETTINGS["pmid_regex_pattern"]  # type: ignore
+    author_threshold: int = DEFAULT_SETTINGS["author_threshold"]  # type: ignore
+    citation_format: str = DEFAULT_SETTINGS["citation_format"]  # type: ignore
+    reference_item_format: str = DEFAULT_SETTINGS["reference_item_format"]  # type: ignore
+    author_name_format: str = DEFAULT_SETTINGS["author_name_format"]  # type: ignore
+    references_header: str = DEFAULT_SETTINGS["references_header"]  # type: ignore
+    api_base_url: str = DEFAULT_SETTINGS["api_base_url"]  # type: ignore
+    api_key: str | None = DEFAULT_SETTINGS["api_key"]  # type: ignore
+    api_timeout: float = DEFAULT_SETTINGS["api_timeout"]  # type: ignore
+    max_workers: int = DEFAULT_SETTINGS["max_workers"]  # type: ignore
+    use_cache: bool = DEFAULT_SETTINGS["use_cache"]  # type: ignore
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+
+class RateLimiter:
+    """APIレート制限を管理するスレッドセーフなクラス"""
+
+    def __init__(self, calls_per_second: float):
+        self.interval = 1.0 / calls_per_second
+        self.lock = threading.Lock()
+        self.last_call = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_call
+            wait_time = self.interval - elapsed
+            if wait_time > 0:
+                time.sleep(wait_time)
+            self.last_call = time.time()
 
 
 # =============================================================================
@@ -119,220 +137,163 @@ class ArticleMetadata:
 
 
 class PubMedClient:
-    """PubMed API との通信を担当"""
+    """PubMed API クライアント (並列処理対応)"""
 
     def __init__(self, settings: GlobalSettings):
         self.settings = settings
-        # APIキーがある場合は遅延を短縮
-        self.delay = 0.1 if self.settings.api_key else self.settings.api_request_delay
+        # APIキーありなら10req/sec, なしなら3req/sec (安全マージン)
+        limit = 9.0 if settings.api_key else 2.5
+        self.limiter = RateLimiter(limit)
+        self.session = requests.Session()
 
-    def fetch_details(
-        self, pmids: list[PMID]
-    ) -> tuple[dict[PMID, ArticleMetadata], list[PMID]]:
-        """指定された PMID リストの詳細を PubMed API から取得"""
+    def _fetch_chunk(self, pmids: list[PMID]) -> dict[PMID, ArticleMetadata]:
+        """PMIDのリスト(最大50件)を一括取得"""
         if not pmids:
-            return {}, []
+            return {}
 
-        chunk_size = 100
-        api_details: dict[PMID, ArticleMetadata] = {}
-        api_not_found: list[PMID] = []
+        self.limiter.wait()
+        pmid_str = ",".join(pmids)
+        params = {
+            "db": "pubmed",
+            "id": pmid_str,
+            "retmode": "json",
+        }
+        if self.settings.api_key:
+            params["api_key"] = self.settings.api_key
 
-        print(f"Fetching {len(pmids)} articles from PubMed API...")
+        results: dict[PMID, ArticleMetadata] = {}
+        try:
+            resp = self.session.get(
+                self.settings.api_base_url,
+                params=params,
+                timeout=self.settings.api_timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-        for i in range(0, len(pmids), chunk_size):
-            chunk = pmids[i : i + chunk_size]
-            pmid_string = ",".join(chunk)
-            url = f"{self.settings.api_base_url}esummary.fcgi?db=pubmed&id={pmid_string}&retmode=json"
-            if self.settings.api_key:
-                url += f"&api_key={self.settings.api_key}"
+            result = data.get("result", {})
+            uids = result.get("uids", [])
 
-            # Simple progress log
-            # print(f"  Requesting chunk {i//chunk_size + 1}...")
+            for pmid in pmids:
+                if pmid in uids:
+                    item = result[pmid]
+                    if "error" in item:
+                        results[pmid] = ArticleMetadata(pmid=pmid, error=item["error"])
+                    else:
+                        results[pmid] = self._parse_json(pmid, item)
+                else:
+                    results[pmid] = ArticleMetadata(pmid=pmid, error="Not found")
 
-            try:
-                response = requests.get(url, timeout=self.settings.api_timeout)
-                response.raise_for_status()
-                data = response.json()
-                results = data.get("result")
+        except Exception as e:
+            print(f"  [API Error] Batch failed: {e}")
+            for pmid in pmids:
+                results[pmid] = ArticleMetadata(pmid=pmid, error=str(e))
 
-                if not results or "uids" not in results:
-                    api_not_found.extend(chunk)
-                    for pmid in chunk:
-                        api_details[pmid] = ArticleMetadata(
-                            pmid=pmid, error="Not found in API response"
-                        )
-                    continue
+        return results
 
-                returned_uids = results.get("uids", [])
-                self._process_results(
-                    chunk, returned_uids, results, api_details, api_not_found
-                )
+    def _parse_json(self, pmid: PMID, item: dict) -> ArticleMetadata:
+        """JSONレスポンスをArticleMetadataに変換"""
+        doi = ""
+        for aid in item.get("articleids", []):
+            if aid.get("idtype") == "doi":
+                doi = aid.get("value", "")
+                break
+        if not doi and item.get("elocationid", "").startswith("doi:"):
+            doi = item.get("elocationid", "").replace("doi: ", "")
 
-            except requests.exceptions.RequestException as e:
-                print(f"  Error: Connection failed - {e}")
-                api_not_found.extend(chunk)
-                for pmid in chunk:
-                    api_details[pmid] = ArticleMetadata(
-                        pmid=pmid, error=f"API connection failed: {e}"
-                    )
-            except Exception as e:
-                print(f"  Error: Unexpected error - {e}")
-                api_not_found.extend(chunk)
-                for pmid in chunk:
-                    api_details[pmid] = ArticleMetadata(
-                        pmid=pmid, error=f"Unexpected error: {e}"
-                    )
-
-            if i + chunk_size < len(pmids):
-                time.sleep(self.delay)
-
-        return api_details, list(set(api_not_found))
-
-    def _process_results(
-        self,
-        requested_pmids: list[PMID],
-        returned_uids: list[str],
-        results: dict,
-        api_details: dict[PMID, ArticleMetadata],
-        api_not_found: list[PMID],
-    ):
-        """APIの結果を解析"""
-        requested_set = set(requested_pmids)
-        returned_set = set(returned_uids)
-        missing = list(requested_set - returned_set)
-
-        if missing:
-            api_not_found.extend(missing)
-            for pmid in missing:
-                api_details[pmid] = ArticleMetadata(
-                    pmid=pmid, error="Not found in API response"
-                )
-
-        for pmid in returned_uids:
-            if pmid not in results:
-                continue
-
-            entry = results[pmid]
-            if "error" in entry:
-                if pmid not in api_not_found:
-                    api_not_found.append(pmid)
-                api_details[pmid] = ArticleMetadata(pmid=pmid, error=entry["error"])
-                continue
-
-            api_details[pmid] = self._extract_entry_data(pmid, entry)
-
-    def _extract_entry_data(self, pmid: PMID, entry: dict) -> ArticleMetadata:
-        """個々のエントリからデータを抽出"""
-        authors_list = entry.get("authors", [])
-        author_names = [a.get("name", "N/A") for a in authors_list]
-
-        articleids = entry.get("articleids", [])
-        doi = next(
-            (aid.get("value", "") for aid in articleids if aid.get("idtype") == "doi"),
-            "",
-        )
-        if not doi and entry.get("elocationid", "").startswith("doi:"):
-            doi = entry.get("elocationid", "").replace("doi: ", "")
+        authors = [a.get("name", "") for a in item.get("authors", []) if "name" in a]
 
         return ArticleMetadata(
             pmid=pmid,
-            title=entry.get("title", "N/A"),
-            authors_list=author_names,
-            year=entry.get("pubdate", "").split(" ")[0],
-            journal=entry.get("source", "N/A"),
-            volume=str(entry.get("volume", "")),
-            issue=str(entry.get("issue", "")),
-            pages=str(entry.get("pages", "")),
+            title=item.get("title", "N/A"),
+            authors_list=authors,
+            journal=item.get("source", "N/A"),
+            year=item.get("pubdate", "").split()[0] if item.get("pubdate") else "",
+            volume=str(item.get("volume", "")),
+            issue=str(item.get("issue", "")),
+            pages=str(item.get("pages", "")),
             doi=doi,
         )
 
+    def fetch_all(self, pmids: list[PMID]) -> dict[PMID, ArticleMetadata]:
+        """並列処理で全PMIDを取得"""
+        unique_pmids = list(set(pmids))
+        if not unique_pmids:
+            return {}
+
+        results: dict[PMID, ArticleMetadata] = {}
+        chunk_size = 50
+        chunks = [
+            unique_pmids[i : i + chunk_size]
+            for i in range(0, len(unique_pmids), chunk_size)
+        ]
+
+        print(f"Fetching {len(unique_pmids)} articles using {self.settings.max_workers} threads...")
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.settings.max_workers
+        ) as executor:
+            future_to_chunk = {
+                executor.submit(self._fetch_chunk, chunk): chunk for chunk in chunks
+            }
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                try:
+                    data = future.result()
+                    results.update(data)
+                except Exception as e:
+                    print(f"  [Thread Error] {e}")
+
+        return results
+
 
 class CacheManager:
-    """キャッシュ管理"""
+    """ローカルファイルへのキャッシュ管理"""
 
-    def __init__(self, settings: GlobalSettings, cache_path: Path | None = None):
-        self.settings = settings
-        self.cache_data: dict[PMID, ArticleMetadata] = {}
-
-        if not self.settings.use_cache:
-            self.cache_file = None
-            return
-
-        # 優先順位:
-        # 1. コンストラクタで渡された cache_path (絶対パス指定など)
-        # 2. Settings のデフォルト (処理としては呼び出し側で解決して渡す形に変更)
-
-        if cache_path:
-            if cache_path.is_dir():
-                self.cache_file = cache_path / self.settings.cache_filename
-            else:
-                # 渡されたのがファイルパスならそのまま使う（拡張子チェックなどは緩く）
-                self.cache_file = cache_path
-        else:
-            # フォールバック（通常は起きないように呼び出し側で制御するが、念のため一時フォルダ）
-            self.cache_file = Path(tempfile.gettempdir()) / "pyrefpmid_cache.json"
-
-        self._load()
+    def __init__(self, filepath: Path, use_cache: bool = True):
+        self.filepath = filepath
+        self.use_cache = use_cache
+        self.data: dict[PMID, ArticleMetadata] = {}
+        if self.use_cache:
+            self._load()
 
     def _load(self):
-        """キャッシュ読み込み"""
-        if not self.cache_file or not self.cache_file.exists():
+        if not self.filepath.exists():
             return
-
         try:
-            with open(self.cache_file, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-
-            for pmid, item in raw_data.items():
-                try:
-                    meta = ArticleMetadata.from_dict(item)
-                    self.cache_data[pmid] = meta
-                except Exception:
-                    pass
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+                for k, v in raw.items():
+                    self.data[k] = ArticleMetadata.from_dict(v)
         except Exception as e:
-            print(f"Warning: Cache load error: {e}")
-            self.cache_data = {}
+            print(f"Warning: Cache load failed ({e}). Starting fresh.")
 
     def save(self):
-        """キャッシュ保存"""
-        if not self.settings.use_cache or not self.cache_file:
+        if not self.use_cache:
             return
-
         try:
-            if not self.cache_file.parent.exists():
-                self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-
-            serializable_data = {
-                pmid: meta.to_dict() for pmid, meta in self.cache_data.items()
-            }
-            with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(serializable_data, f, ensure_ascii=False, indent=2)
+            export = {k: asdict(v) for k, v in self.data.items()}
+            with open(self.filepath, "w", encoding="utf-8") as f:
+                json.dump(export, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"Warning: Cache save error: {e}")
+            print(f"Warning: Cache save failed ({e})")
 
-    def get_details(
+    def get_missing(
         self, pmids: list[PMID]
     ) -> tuple[dict[PMID, ArticleMetadata], list[PMID]]:
-        """キャッシュから取得"""
-        if not self.settings.use_cache:
+        if not self.use_cache:
             return {}, list(pmids)
-
         found = {}
-        not_found = []
-
+        missing = []
         for pmid in pmids:
-            item = self.cache_data.get(pmid)
-            if item and item.is_valid:
-                found[pmid] = item
+            if pmid in self.data and self.data[pmid].is_valid:
+                found[pmid] = self.data[pmid]
             else:
-                not_found.append(pmid)
+                missing.append(pmid)
+        return found, missing
 
-        return found, not_found
-
-    def update(self, new_details: dict[PMID, ArticleMetadata]):
-        """キャッシュ更新"""
-        if self.settings.use_cache:
-            self.cache_data.update(new_details)
+    def update(self, new_data: dict[PMID, ArticleMetadata]):
+        if self.use_cache:
+            self.data.update(new_data)
             self.save()
 
 
@@ -341,9 +302,7 @@ class CitationParser:
 
     def __init__(self, settings: GlobalSettings):
         self.settings = settings
-        self.pmid_regex = re.compile(
-            self.settings.pmid_regex_pattern, flags=re.IGNORECASE
-        )
+        self.pmid_regex = re.compile(self.settings.pmid_regex_pattern)
         self.header_regex = re.compile(
             r"^(#+)\s+(Introduction|Methods|Results|Discussion|Conclusion|Background|Case Report|Abstract|はじめに|方法|結果|考察|結論|背景|症例報告|要旨)",
             re.MULTILINE | re.IGNORECASE,
@@ -362,9 +321,9 @@ class CitationParser:
         if not matches:
             return [], {}
 
-        pmid_groups = []
-        raw_pmids_in_order = []
-        current_group_pmids = []
+        pmid_groups: list[tuple[list[PMID], tuple[int, int]]] = []
+        raw_pmids_in_order: list[PMID] = []
+        current_group_pmids: list[PMID] = []
         current_group_start = -1
         current_group_end = 0
 
@@ -428,69 +387,59 @@ class ReferenceFormatter:
 
     def _parse_name(self, raw_name: str) -> dict[str, str]:
         """PubMed形式の名前(Surname Initials)を解析して辞書を返す"""
-        # デフォルト値
         data = {
             "name": raw_name,
             "last": raw_name,
             "initials": "",
         }
-
-        # 単純な空白分割 (Surname Initials)
         parts = raw_name.rsplit(" ", 1)
         if len(parts) == 2:
-            # 2つに分かれた場合、後ろがイニシャル(大文字のみ)か確認
             surname, initials = parts
-            # シンプルなヒューリスティック: Initialsは大文字のみで構成されることが多い
-            # あるいは "Jr" などが含まれるとややこしいが、PubMed APIは基本 "Surname AB"
             if initials.isupper() and len(initials) <= 3:
                 data["last"] = surname
                 data["initials"] = initials
-
         return data
 
     def _format_single_author(self, raw_name: str) -> str:
         """1人の著者名をフォーマットに従って整形"""
         if self.settings.author_name_format == "{name}":
             return raw_name
-
         data = self._parse_name(raw_name)
         try:
             return self.settings.author_name_format.format(**data)
         except Exception:
-            # フォーマットエラー時は生データを返す
             return raw_name
 
     def _format_authors(self, authors_list: list[str]) -> str:
-        # まず個々の著者を整形
         formatted_authors = [self._format_single_author(a) for a in authors_list]
-
         thresh = self.settings.author_threshold
         if thresh > 0 and len(formatted_authors) > thresh:
             return ", ".join(formatted_authors[:thresh]) + ", et al"
         return ", ".join(formatted_authors)
 
     def _format_ranges(self, numbers: list[int]) -> str:
+        """連続した番号を範囲形式に圧縮 (例: 1,2,3 -> 1-3)"""
         if not numbers:
             return ""
         numbers = sorted(set(numbers))
         ranges = []
         start = end = numbers[0]
 
+        def append_range():
+            if end > start + 1:
+                ranges.append(f"{start}-{end}")
+            elif end == start + 1:
+                ranges.append(f"{start},{end}")
+            else:
+                ranges.append(str(start))
+
         for n in numbers[1:]:
             if n == end + 1:
                 end = n
             else:
-                ranges.append(
-                    f"{start}-{end}" if end > start + 1 else (
-                        f"{start},{end}" if end == start + 1 else str(start)
-                    )
-                )
+                append_range()
                 start = end = n
-        ranges.append(
-            f"{start}-{end}" if end > start + 1 else (
-                f"{start},{end}" if end == start + 1 else str(start)
-            )
-        )
+        append_range()
         return ",".join(ranges)
 
     def replace_citations(
@@ -531,11 +480,20 @@ class ReferenceFormatter:
         for pmid, number in pmid_map.items():
             meta = details_map.get(pmid)
             if meta and meta.is_valid:
-                d = meta.to_dict()
-                d["authors"] = self._format_authors(meta.authors_list)
+                authors_str = self._format_authors(meta.authors_list)
                 try:
-                    formatted_item = self.settings.reference_item_format.format(number=number, **d)
-                    # 自動クリーニング: 二重ドットを防ぐ
+                    formatted_item = self.settings.reference_item_format.format(
+                        number=number,
+                        authors=authors_str,
+                        title=meta.title,
+                        journal=meta.journal,
+                        year=meta.year,
+                        volume=meta.volume,
+                        issue=meta.issue,
+                        pages=meta.pages,
+                        doi=meta.doi,
+                        pmid=meta.pmid,
+                    )
                     formatted_item = formatted_item.replace("..", ".")
                     items.append(formatted_item)
                 except Exception:
@@ -552,29 +510,25 @@ class ReferenceFormatter:
 
 
 # =============================================================================
-# Builder
+# Main Processor
 # =============================================================================
 
 
 class ReferenceBuilder:
-    """メイン処理ビルダー"""
+    """メイン処理"""
 
     def __init__(
         self,
         input_path: Path,
         output_path: Path,
         settings: GlobalSettings,
-        cache_path: Path | None = None,
+        cache_path: Path,
     ):
         self.input_path = input_path
         self.output_path = output_path
         self.settings = settings
-
-        # Components
         self.client = PubMedClient(self.settings)
-        # cache_path が None の場合は CacheManager 側で一時フォルダなどが使われるが、
-        # main 側で極力 input_path ベースのパスを渡すようにする
-        self.cache = CacheManager(self.settings, cache_path)
+        self.cache = CacheManager(cache_path, self.settings.use_cache)
         self.parser = CitationParser(self.settings)
         self.formatter = ReferenceFormatter(self.settings)
 
@@ -588,39 +542,29 @@ class ReferenceBuilder:
             print(f"Error reading file: {e}")
             return False
 
-        # 1. コンテンツの分割（既存Referencesを除外して解析するため）
+        # 1. コンテンツの分割（既存Referencesを除外して解析）
         pre_content, post_content, insertion_mode = self._split_content(content)
-
-        # 解析対象は本文全体 (Referencesセクションを除く)
         scan_target = pre_content + post_content
 
         # 2. 解析
         pmid_groups, pmid_map = self.parser.extract_pmids(scan_target)
         if not pmid_map:
             print("No PMIDs found in the document.")
-            self._copy_if_needed()
+            self._copy_if_needed(content)
             return True
 
         # 3. 取得 (Cache -> API)
         pmids = list(pmid_map.keys())
-        cached_details, missing = self.cache.get_details(pmids)
-        api_details, not_found = self.client.fetch_details(missing)
+        cached_details, missing = self.cache.get_missing(pmids)
 
-        final_details = {**cached_details, **api_details}
-        if api_details:
+        api_details: dict[PMID, ArticleMetadata] = {}
+        if missing:
+            api_details = self.client.fetch_all(missing)
             self.cache.update(api_details)
 
-        # 4. 置換 (Pre と Post を個別に処理してインデックスずれを防ぐ)
-        # extract_pmids は scan_target 全体のオフセットを返すが、
-        # pre_content の長さを使えば post_content 用のグループも特定可能。
-        # ここではシンプルに ReferenceFormatter を再利用するため、個別に置換を行う。
-        # ただし pmid_map (番号) は共有する。
+        final_details = {**cached_details, **api_details}
 
-        # pre/post それぞれで再度グループ抽出を行うのは非効率だが、
-        # 正確性を期すなら文字列置換は慎重に行う必要がある。
-        # formatter.replace_citations は「テキスト全部」と「その中のグループ位置」を受け取る設計。
-        # scan_target に対する groups は既にあるので、それを split ポイントで分割して適用する。
-
+        # 4. 置換
         split_point = len(pre_content)
         pre_groups = []
         post_groups = []
@@ -630,12 +574,9 @@ class ReferenceBuilder:
             if end <= split_point:
                 pre_groups.append((pmid_list, span))
             elif start >= split_point:
-                # Post側のオフセットは調整が必要
                 new_span = (start - split_point, end - split_point)
                 post_groups.append((pmid_list, new_span))
             else:
-                # 境界を跨ぐケース（まずあり得ないが、あれば Pre に寄せるなどの処理）
-                # ここでは安全のため Pre 扱いにする（実質分割点で切れているはず）
                 pre_groups.append((pmid_list, span))
 
         new_pre = self.formatter.replace_citations(pre_content, pre_groups, pmid_map)
@@ -643,21 +584,15 @@ class ReferenceBuilder:
 
         # 5. セクション生成
         header_level = self.parser.detect_header_level(scan_target)
-        ref_section = self.formatter.create_section(
-            pmid_map, final_details, header_level
-        )
+        ref_section = self.formatter.create_section(pmid_map, final_details, header_level)
 
         # 6. 結合
         if ref_section:
             if insertion_mode == "append":
-                # 末尾に追加（間に改行を入れる）
                 final_content = new_pre.rstrip() + "\n\n" + ref_section + "\n" + new_post
             else:
-                # 既存置換 or マーカー置換（Pre + Refs + Post）
-                # 文脈に合わせて改行を調整
                 final_content = new_pre + ref_section + "\n" + new_post
         else:
-            # 参考文献なし（PMIDはあるがデータ取得失敗など？通常ここには来ない）
             final_content = new_pre + new_post
 
         # 7. 保存
@@ -673,28 +608,18 @@ class ReferenceBuilder:
     def _split_content(self, content: str) -> tuple[str, str, str]:
         """
         コンテンツを (Pre, Post, Mode) に分割する。
-        既存の References セクションを削除・除外して、再生成位置を特定するため。
-        Mode: "append" (末尾追加), "insert" (中間挿入/置換)
         """
-        # 1. マーカー検索 (<!-- REFERENCES --> 等) - 将来拡張用だが今回は既存ヘッダー優先
-
-        # 2. 既存 References セクション検索
         match = self.parser.find_reference_section(content)
         if match:
-            # 見つかった場合: その部分を除去して Pre/Post に分ける
             pre = content[: match.start()]
             post = content[match.end() :]
             return pre, post, "insert"
-
-        # 3. 見つからない場合: 全体を Pre とし、Post は空、Mode は Append
         return content, "", "append"
 
-    def _copy_if_needed(self):
+    def _copy_if_needed(self, content: str):
         if self.input_path != self.output_path:
             try:
-                self.output_path.write_text(
-                    self.input_path.read_text(encoding="utf-8"), encoding="utf-8"
-                )
+                self.output_path.write_text(content, encoding="utf-8")
             except Exception:
                 pass
 
@@ -706,28 +631,26 @@ class ReferenceBuilder:
 
 def _select_file_gui() -> Path | None:
     """GUIファイル選択"""
-    import tkinter as tk
-    from tkinter import filedialog
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
 
-    root = tk.Tk()
-    root.withdraw()
-    filepath = filedialog.askopenfilename(
-        title="Select Markdown File",
-        filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
-    )
-    root.destroy()
-    return Path(filepath) if filepath else None
+        root = tk.Tk()
+        root.withdraw()
+        filepath = filedialog.askopenfilename(
+            title="Select Markdown File",
+            filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
+        )
+        root.destroy()
+        return Path(filepath) if filepath else None
+    except Exception:
+        return None
 
 
 def _select_input_file() -> Path | None:
-    """入力ファイルをスマートに選択"""
+    """入力ファイル選択"""
     cwd = Path.cwd()
-    # 候補取得（_cited.md は除外すると親切かもしれないが、あえて含めるか、あるいは除外するか。
-    # ここではシンプルにすべての .md を対象とするが、自分自身(出力済みファイル)を誤って処理しないように注意）
     candidates = list(cwd.glob("*.md"))
-
-    # 除外ロジック: 明らかに自動生成されたファイル (_cited.md) を優先度下げるなどが可能だが、
-    # ユーザーがそれを再処理したい場合もあるので、とりあえず全てリストアップする。
 
     if len(candidates) == 0:
         return _select_file_gui()
@@ -747,7 +670,8 @@ def _select_input_file() -> Path | None:
         while True:
             try:
                 choice = input("Select number: ")
-                if not choice: continue
+                if not choice:
+                    continue
                 if choice == "0":
                     return _select_file_gui()
                 if choice.isdigit():
@@ -760,13 +684,13 @@ def _select_input_file() -> Path | None:
                 return None
             print("Invalid selection. Try again.")
     else:
-        # ターミナルでない場合はGUIへフォールバック
+        print("Multiple markdown files found. Opening selector...")
         return _select_file_gui()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="PyRefPmid - Automated PubMed Reference Generator",
+        description="PyRefPmid - Hybrid PubMed Reference Generator",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("input_file", nargs="?", help="Input Markdown file path")
@@ -777,14 +701,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--author-threshold", type=int, default=None)
     parser.add_argument("--citation-format", default=None)
     parser.add_argument("--ref-item-format", default=None)
-    parser.add_argument("--author-name-format", default=None, help="Format for author names (e.g. '{last}, {initials_dotted}')")
-    parser.add_argument("--api-delay", type=float, default=None)
+    parser.add_argument(
+        "--author-name-format",
+        default=None,
+        help="Format for author names (e.g. '{last}, {initials}')",
+    )
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--references-header", default=None)
     parser.add_argument("--cache-file", default=None)
-    parser.add_argument(
-        "--no-cache", action="store_true", help="Disable caching"
-    )
+    parser.add_argument("--max-workers", type=int, default=None, help="Max parallel threads")
+    parser.add_argument("--no-cache", action="store_true", help="Disable caching")
 
     return parser.parse_args()
 
@@ -815,47 +741,29 @@ def main() -> int:
     else:
         output_path = input_path.with_name(f"{input_path.stem}_cited{input_path.suffix}")
 
-    # Build Settings
-    # Load defaults
-    s = DEFAULT_SETTINGS.copy()
-
-    # Update from args if present
-    if args.pmid_regex: s["pmid_regex_pattern"] = args.pmid_regex
-    if args.author_threshold is not None: s["author_threshold"] = args.author_threshold
-    if args.citation_format: s["citation_format"] = args.citation_format
-    if args.ref_item_format: s["reference_item_format"] = args.ref_item_format
-    if args.author_name_format: s["author_name_format"] = args.author_name_format
-    if args.api_delay is not None: s["api_request_delay"] = args.api_delay
-    if args.api_key: s["api_key"] = args.api_key
-    if args.references_header: s["references_header"] = args.references_header
-    if args.no_cache: s["use_cache"] = False
-
+    # Build Settings - apply CLI overrides to defaults
     settings = GlobalSettings(
-        pmid_regex_pattern=str(s["pmid_regex_pattern"]),
-        author_threshold=int(s["author_threshold"]),
-        citation_format=str(s["citation_format"]),
-        reference_item_format=str(s["reference_item_format"]),
-        author_name_format=str(s["author_name_format"]),
-        references_header=str(s["references_header"]),
-        api_base_url=str(s["api_base_url"]),
-        api_request_delay=float(s["api_request_delay"]),
-        api_key=str(s["api_key"]) if s["api_key"] else None,
-        api_timeout=float(s["api_timeout"]),
-        use_cache=bool(s["use_cache"]),
+        pmid_regex_pattern=args.pmid_regex or DEFAULT_SETTINGS["pmid_regex_pattern"],
+        author_threshold=args.author_threshold if args.author_threshold is not None else DEFAULT_SETTINGS["author_threshold"],
+        citation_format=args.citation_format or DEFAULT_SETTINGS["citation_format"],
+        reference_item_format=args.ref_item_format or DEFAULT_SETTINGS["reference_item_format"],
+        author_name_format=args.author_name_format or DEFAULT_SETTINGS["author_name_format"],
+        references_header=args.references_header or DEFAULT_SETTINGS["references_header"],
+        api_base_url=DEFAULT_SETTINGS["api_base_url"],
+        api_key=args.api_key or DEFAULT_SETTINGS["api_key"],
+        api_timeout=DEFAULT_SETTINGS["api_timeout"],
+        max_workers=args.max_workers if args.max_workers is not None else DEFAULT_SETTINGS["max_workers"],
+        use_cache=not args.no_cache,
     )
 
     # Cache Path Determination
-    # デフォルト: 入力ファイルと同じディレクトリに <入力ファイル名>.json として保存
-    # ユーザー指定(--cache-file)があればそれを使用
     if args.cache_file:
         cache_path = Path(args.cache_file)
     else:
-        # cache_filename 設定はデフォルト値として持っているが、
-        # ここでは入力ファイル名に連動させるため、設定値ではなく動的に生成する
         cache_path = input_path.with_suffix(".json")
 
     # Run Builder
-    print("PyRefPmid v" + __version__)
+    print(f"PyRefPmid v{__version__}")
     builder = ReferenceBuilder(input_path, output_path, settings, cache_path)
     success = builder.build()
 
