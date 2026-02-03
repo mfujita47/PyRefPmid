@@ -14,7 +14,7 @@ Requirements:
 """
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 __author__ = "mfujita47 (Mitsugu Fujita)"
 
 import argparse
@@ -46,12 +46,13 @@ class GlobalSettings:
 
     pmid_regex_pattern: str = r"(?i)\[pm(?:id)?:?\s*(\d+)\](?:\([^)]*\))?"
     author_threshold: int = 0
+    author_display_count: int = 0  # threshold超過時に表示する著者数 (0 = thresholdと同値)
     citation_format: str = "({number})"
     author_name_format: str = "{last} {initials}"
     reference_item_format: str = "{number}. {authors}. {title} {journal} {year};{volume}({issue}):{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
     references_header: str = "References"
     api_base_url: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    api_key: str | None = "3a88fc215344206ea89f04981d824c4ca608"
+    api_key: str | None = None
     api_timeout: float = 10.0
     max_workers: int = 5
     use_cache: bool = True
@@ -410,7 +411,9 @@ class ReferenceFormatter:
         formatted_authors = [self._format_single_author(a) for a in authors_list]
         thresh = self.settings.author_threshold
         if thresh > 0 and len(formatted_authors) > thresh:
-            return ", ".join(formatted_authors[:thresh]) + ", et al"
+            # display_count が指定されていればその数、なければ threshold と同じ数を表示
+            display = self.settings.author_display_count or thresh
+            return ", ".join(formatted_authors[:display]) + ", et al"
         return ", ".join(formatted_authors)
 
     def _format_ranges(self, numbers: list[int]) -> str:
@@ -695,6 +698,8 @@ def parse_args() -> argparse.Namespace:
     # Settings overrides (defaults from DEFAULT_SETTINGS)
     parser.add_argument("--pmid-regex", default=DEFAULT_SETTINGS["pmid_regex_pattern"])
     parser.add_argument("--author-threshold", type=int, default=DEFAULT_SETTINGS["author_threshold"])
+    parser.add_argument("--author-display", type=int, default=DEFAULT_SETTINGS["author_display_count"],
+                        help="Number of authors to show when exceeding threshold (0 = same as threshold)")
     parser.add_argument("--citation-format", default=DEFAULT_SETTINGS["citation_format"])
     parser.add_argument("--ref-item-format", default=DEFAULT_SETTINGS["reference_item_format"])
     parser.add_argument(
@@ -741,6 +746,7 @@ def main() -> int:
     settings = GlobalSettings(
         pmid_regex_pattern=args.pmid_regex,
         author_threshold=args.author_threshold,
+        author_display_count=args.author_display,
         citation_format=args.citation_format,
         reference_item_format=args.ref_item_format,
         author_name_format=args.author_name_format,

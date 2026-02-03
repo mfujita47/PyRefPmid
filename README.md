@@ -1,4 +1,4 @@
-# 📚 PyRefPmid: Markdown PubMed Referencer (v2.0.0)
+# 📚 PyRefPmid: Markdown PubMed Referencer (v2.2.0)
 
 **PyRefPmid** は、Markdown 原稿内の PubMed ID (PMID) を自動検出し、PubMed API から書誌情報を取得して参考文献リスト (References) を自動生成する Python スクリプトです。
 
@@ -93,6 +93,10 @@ python PyRefPmid.py [入力ファイル] [オプション]
 - **`--author-threshold`**
   - 参考文献リストに表示する著者の最大数。この数を超えると `et al` で省略されます。
   - **デフォルト**: `0` (全員表示)
+- **`--author-display`**
+  - `--author-threshold` を超過した場合に実際に表示する著者数。
+  - **デフォルト**: `0` (`--author-threshold` と同じ数を表示)
+  - **例**: `--author-threshold 6 --author-display 3` → 著者6人以上の場合、最初の3人 + et al
 - **`--references-header`**
   - 参考文献セクションの見出し。
   - **デフォルト**: `References`
@@ -112,7 +116,7 @@ python PyRefPmid.py [入力ファイル] [オプション]
 
 ## 🧑‍💻 作者 (Author)
 
-- **mfujita47 (Mitsugu Fujita)** - [GitHub](https://github.com/mfujita47)
+- **mfujita47 (Mitsugu Fujita)** - [https://github.com/mfujita47](https://github.com/mfujita47)
 
 ## 📄 ライセンス
 

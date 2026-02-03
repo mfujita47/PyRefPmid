@@ -5,6 +5,15 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [2.2.0] - 2026-02-03
+
+### 追加
+
+- **著者表示のカスタマイズ機能**:
+  - `--author-display` オプションを追加。`--author-threshold` 超過時に実際に表示する著者数を個別に指定可能に。
+  - 例: `--author-threshold 6 --author-display 3` で「6人以上の場合は最初の3人 + et al」という医学雑誌の投稿規定に対応。
+  - 後方互換性を維持（`--author-display` 未指定時は従来どおり `threshold` と同数を表示）。
+
 ## [2.1.0] - 2026-02-03
 
 ### 変更
