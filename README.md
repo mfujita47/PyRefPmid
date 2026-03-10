@@ -1,4 +1,4 @@
-# 📚 PyRefPmid: Markdown PubMed Referencer (v2.2.0)
+# 📚 PyRefPmid: Markdown PubMed Referencer (v2.3.0)
 
 **PyRefPmid** は、Markdown 原稿内の PubMed ID (PMID) を自動検出し、PubMed API から書誌情報を取得して参考文献リスト (References) を自動生成する Python スクリプトです。
 
