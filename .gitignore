@@ -40,7 +40,7 @@ venv.bak/
 !.vscode/launch.json
 !.vscode/extensions.json
 # *.code-workspace # Typically at a higher level
-PyRef.code-workspace
+PyRefPmid.code-workspace
 
 .idea/
 
@@ -77,6 +77,7 @@ Desktop.ini
 *.log
 
 # Backup files
+backups/
 *.bak
 *.bck
 *~

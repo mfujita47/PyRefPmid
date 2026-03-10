@@ -5,6 +5,14 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [2.3.0] - 2026-03-10
+
+### 追加
+
+- **スマートイニシャル整形機能**:
+  - `--author-name-format` において `{initials}` の直後に記号（ピリオドなど）がある場合、各イニシャル文字にその記号を適用するように改善。
+  - 例: `--author-name-format "{last}, {initials}."` と指定した場合、著者名 "Fujita MT" が "Fujita, M.T." と出力される。
+
 ## [2.2.0] - 2026-02-03
 
 ### 追加

@@ -14,7 +14,7 @@ Requirements:
 """
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 __author__ = "mfujita47 (Mitsugu Fujita)"
 
 import argparse
@@ -35,14 +35,8 @@ except ImportError:
     print("Error: 'requests' library is missing. Please install it via 'pip install requests'.")
     sys.exit(1)
 
-# =============================================================================
-# Default Settings
-# =============================================================================
-
-
 @dataclass(frozen=True)
 class GlobalSettings:
-    """グローバル設定"""
 
     pmid_regex_pattern: str = r"(?i)\[pm(?:id)?:?\s*(\d+)\](?:\([^)]*\))?"
     author_threshold: int = 0
@@ -52,32 +46,21 @@ class GlobalSettings:
     reference_item_format: str = "{number}. {authors}. {title} {journal} {year};{volume}({issue}):{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
     references_header: str = "References"
     api_base_url: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    api_key: str | None = None
+    api_key: str | None = "3a88fc215344206ea89f04981d824c4ca608"
     api_timeout: float = 10.0
     max_workers: int = 5
     use_cache: bool = True
-
 
 # GlobalSettings から DEFAULT_SETTINGS を自動生成
 DEFAULT_SETTINGS: dict[str, Any] = {
     f.name: f.default for f in fields(GlobalSettings) if f.default is not MISSING
 }
 
-# =============================================================================
-# Type Aliases
-# =============================================================================
-
 PMID = str
 MetaDict = dict[str, Any]
 
-# =============================================================================
-# Data Models
-# =============================================================================
-
-
 @dataclass
 class ArticleMetadata:
-    """論文のメタデータ"""
 
     pmid: PMID
     title: str = "N/A"
@@ -96,18 +79,11 @@ class ArticleMetadata:
 
     @classmethod
     def from_dict(cls, data: MetaDict) -> ArticleMetadata:
-        """辞書からインスタンスを生成"""
         known_keys = cls.__annotations__.keys()
         filtered_data = {k: v for k, v in data.items() if k in known_keys}
         if "authors_list" in filtered_data and not isinstance(filtered_data["authors_list"], list):
             filtered_data["authors_list"] = []
         return cls(**filtered_data)
-
-
-# =============================================================================
-# Utilities
-# =============================================================================
-
 
 class RateLimiter:
     """APIレート制限を管理するスレッドセーフなクラス"""
@@ -125,12 +101,6 @@ class RateLimiter:
             if wait_time > 0:
                 time.sleep(wait_time)
             self.last_call = time.time()
-
-
-# =============================================================================
-# Core Components
-# =============================================================================
-
 
 class PubMedClient:
     """PubMed API クライアント (並列処理対応)"""
@@ -213,7 +183,6 @@ class PubMedClient:
         )
 
     def fetch_all(self, pmids: list[PMID]) -> dict[PMID, ArticleMetadata]:
-        """並列処理で全PMIDを取得"""
         unique_pmids = list(set(pmids))
         if not unique_pmids:
             return {}
@@ -242,9 +211,7 @@ class PubMedClient:
 
         return results
 
-
 class CacheManager:
-    """ローカルファイルへのキャッシュ管理"""
 
     def __init__(self, filepath: Path, use_cache: bool = True):
         self.filepath = filepath
@@ -293,9 +260,7 @@ class CacheManager:
             self.data.update(new_data)
             self.save()
 
-
 class CitationParser:
-    """テキスト解析"""
 
     def __init__(self, settings: GlobalSettings):
         self.settings = settings
@@ -313,7 +278,6 @@ class CitationParser:
     def extract_pmids(
         self, content: str
     ) -> tuple[list[tuple[list[PMID], tuple[int, int]]], dict[PMID, int]]:
-        """PMIDを抽出し、グループと出現順マップを返す"""
         matches = list(self.pmid_regex.finditer(content))
         if not matches:
             return [], {}
@@ -375,15 +339,12 @@ class CitationParser:
     def find_reference_section(self, content: str) -> re.Match | None:
         return self.remove_refs_regex.search(content)
 
-
 class ReferenceFormatter:
-    """整形"""
 
     def __init__(self, settings: GlobalSettings):
         self.settings = settings
 
     def _parse_name(self, raw_name: str) -> dict[str, str]:
-        """PubMed形式の名前(Surname Initials)を解析して辞書を返す"""
         data = {
             "name": raw_name,
             "last": raw_name,
@@ -398,12 +359,26 @@ class ReferenceFormatter:
         return data
 
     def _format_single_author(self, raw_name: str) -> str:
-        """1人の著者名をフォーマットに従って整形"""
         if self.settings.author_name_format == "{name}":
             return raw_name
         data = self._parse_name(raw_name)
+        
+        fmt = self.settings.author_name_format
+        initials = data.get("initials", "")
+        
+        # {initials}直後の文字を取得し、各イニシャルに適用する
+        if initials:
+            match = re.search(r"\{initials\}([^a-zA-Z0-9\s{}])", fmt)
+            if match:
+                sep = match.group(1)
+                # 各文字の後にセパレータを挿入
+                smart_initials = "".join(f"{c}{sep}" for c in initials)
+                data["initials"] = smart_initials
+                # 重複を避けるため、フォーマット文字列から直後のセパレータを一時的に除去
+                fmt = fmt.replace(f"{{initials}}{sep}", "{initials}")
+
         try:
-            return self.settings.author_name_format.format(**data)
+            return fmt.format(**data)
         except Exception:
             return raw_name
 
@@ -411,13 +386,11 @@ class ReferenceFormatter:
         formatted_authors = [self._format_single_author(a) for a in authors_list]
         thresh = self.settings.author_threshold
         if thresh > 0 and len(formatted_authors) > thresh:
-            # display_count が指定されていればその数、なければ threshold と同じ数を表示
             display = self.settings.author_display_count or thresh
             return ", ".join(formatted_authors[:display]) + ", et al"
         return ", ".join(formatted_authors)
 
     def _format_ranges(self, numbers: list[int]) -> str:
-        """連続した番号を範囲形式に圧縮 (例: 1,2,3 -> 1-3)"""
         if not numbers:
             return ""
         numbers = sorted(set(numbers))
@@ -507,14 +480,7 @@ class ReferenceFormatter:
         header = "#" * header_level + " " + self.settings.references_header
         return f"{header}\n\n" + "\n".join(items)
 
-
-# =============================================================================
-# Main Processor
-# =============================================================================
-
-
 class ReferenceBuilder:
-    """メイン処理"""
 
     def __init__(
         self,
@@ -532,7 +498,6 @@ class ReferenceBuilder:
         self.formatter = ReferenceFormatter(self.settings)
 
     def build(self) -> bool:
-        """処理実行"""
         print(f"Processing: {self.input_path}")
 
         try:
@@ -541,18 +506,18 @@ class ReferenceBuilder:
             print(f"Error reading file: {e}")
             return False
 
-        # 1. コンテンツの分割（既存Referencesを除外して解析）
+        # 1. Split content
         pre_content, post_content, insertion_mode = self._split_content(content)
         scan_target = pre_content + post_content
 
-        # 2. 解析
+        # 2. Parse
         pmid_groups, pmid_map = self.parser.extract_pmids(scan_target)
         if not pmid_map:
             print("No PMIDs found in the document.")
             self._copy_if_needed(content)
             return True
 
-        # 3. 取得 (Cache -> API)
+        # 3. Fetch (Cache -> API)
         pmids = list(pmid_map.keys())
         cached_details, missing = self.cache.get_missing(pmids)
 
@@ -563,7 +528,7 @@ class ReferenceBuilder:
 
         final_details = {**cached_details, **api_details}
 
-        # 4. 置換
+        # 4. Replace
         split_point = len(pre_content)
         pre_groups = []
         post_groups = []
@@ -581,11 +546,11 @@ class ReferenceBuilder:
         new_pre = self.formatter.replace_citations(pre_content, pre_groups, pmid_map)
         new_post = self.formatter.replace_citations(post_content, post_groups, pmid_map)
 
-        # 5. セクション生成
+        # 5. Create section
         header_level = self.parser.detect_header_level(scan_target)
         ref_section = self.formatter.create_section(pmid_map, final_details, header_level)
 
-        # 6. 結合
+        # 6. Combine
         if ref_section:
             if insertion_mode == "append":
                 final_content = new_pre.rstrip() + "\n\n" + ref_section + "\n" + new_post
@@ -594,7 +559,7 @@ class ReferenceBuilder:
         else:
             final_content = new_pre + new_post
 
-        # 7. 保存
+        # 7. Save
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
             self.output_path.write_text(final_content, encoding="utf-8")
@@ -622,14 +587,7 @@ class ReferenceBuilder:
             except Exception:
                 pass
 
-
-# =============================================================================
-# CLI & Entry Point
-# =============================================================================
-
-
 def _select_file_gui() -> Path | None:
-    """GUIファイル選択"""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -645,9 +603,7 @@ def _select_file_gui() -> Path | None:
     except Exception:
         return None
 
-
 def _select_input_file() -> Path | None:
-    """入力ファイル選択"""
     cwd = Path.cwd()
     candidates = list(cwd.glob("*.md"))
 
@@ -686,7 +642,6 @@ def _select_input_file() -> Path | None:
         print("Multiple markdown files found. Opening selector...")
         return _select_file_gui()
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="PyRefPmid - Hybrid PubMed Reference Generator",
@@ -695,7 +650,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input_file", nargs="?", help="Input Markdown file path")
     parser.add_argument("-o", "--output-file", help="Output file path")
 
-    # Settings overrides (defaults from DEFAULT_SETTINGS)
     parser.add_argument("--pmid-regex", default=DEFAULT_SETTINGS["pmid_regex_pattern"])
     parser.add_argument("--author-threshold", type=int, default=DEFAULT_SETTINGS["author_threshold"])
     parser.add_argument("--author-display", type=int, default=DEFAULT_SETTINGS["author_display_count"],
@@ -714,7 +668,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-cache", action="store_true", help="Disable caching")
 
     return parser.parse_args()
-
 
 def main() -> int:
     args = parse_args()
@@ -768,7 +721,6 @@ def main() -> int:
     success = builder.build()
 
     return 0 if success else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())
