@@ -5,6 +5,16 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [3.1.2] - 2026-04-26
+
+### 追加
+
+- **環境変数のサポート**: `api_key` のデフォルト値を環境変数 `NCBI_API_KEY` から取得可能に。
+
+### 変更
+
+- **CLI オプション調整**: `GlobalSettings` の定義から CLI 引数を自動生成するように変更。
+
 ## [3.1.1] - 2026-04-26
 
 ### 変更
@@ -19,7 +29,7 @@
 
 - **NCBI Literature Citation API への移行**:
   - PubMed `esummary` から公式の `ctxp` エンドポイントへ変更。
-  - 最初から完全な CSL-JSON を取得することで、従来のパースエラーを完全に解消。
+  - 最初から完全な CSL-JSON を取得することで、パースエラーを完全に解消。
 - **究極の最適化 (Ultra-Optimized Engine)**:
   - スマート・グルーピング機能の実装。
   - オンデマンド・データ処理への移行。

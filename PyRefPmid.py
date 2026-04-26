@@ -8,12 +8,13 @@ Description:
 """
 from __future__ import annotations
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 __author__ = "mfujita47 (Mitsugu Fujita)"
 
 import argparse
 import concurrent.futures
 import json
+import os
 import re
 import sys
 import threading
@@ -49,14 +50,10 @@ class GlobalSettings:
     csl_locale: str = "en-US"
     references_header: str = "References"
     api_base_url: str = "https://api.ncbi.nlm.nih.gov/lit/ctxp/v1/pubmed/"
-    api_key: str | None = ""
+    api_key: str | None = field(default_factory=lambda: os.environ.get("NCBI_API_KEY"))
     api_timeout: float = 15.0
     max_workers: int = 5
     use_cache: bool = True
-
-DEFAULT_SETTINGS: dict[str, Any] = {
-    f.name: f.default for f in fields(GlobalSettings) if f.default is not MISSING
-}
 
 PMID = str
 
@@ -158,7 +155,7 @@ class CitationProcessor:
         self.style = CitationStylesStyle(str(self._find_style(settings.csl_style)), validate=False)
         self.bibliography = CitationStylesBibliography(self.style, CiteProcJSON(csl_data), formatter.plain)
         self.is_num = getattr(self.style, 'citation_format', '') == 'numeric' or \
-                     any(n in settings.csl_style.lower() for n in ["ieee", "vancouver", "nature"])
+            any(n in settings.csl_style.lower() for n in ["ieee", "vancouver", "nature"])
 
     def _find_style(self, name: str) -> Path:
         for p in [Path(name), Path(f"{name}.csl")]:
@@ -318,28 +315,59 @@ def _resolve_csl_style(style: str) -> str:
     local = next((p for p in Path.cwd().glob("*.csl") if p.stem.lower() == style.lower()), None)
     if local: return str(local)
 
-    for url in [f"https://raw.githubusercontent.com/citation-style-language/styles/master/{style.lower()}.csl",
-                f"https://raw.githubusercontent.com/citation-style-language/styles/master/dependent/{style.lower()}.csl"]:
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                p = Path(f"{style.lower()}.csl")
-                p.write_text(r.text, encoding="utf-8", newline="\n")
-                print(f"✓ Downloaded style: {style}"); return str(p)
-        except Exception: continue
+    url = f"https://raw.githubusercontent.com/citation-style-language/styles/master/{style.lower()}.csl"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            p = Path(f"{style.lower()}.csl")
+            p.write_text(r.text, encoding="utf-8", newline="\n")
+            print(f"✓ Downloaded style: {style}"); return str(p)
+    except Exception: pass
     return style
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PyRefPmid v3.1.1")
-    parser.add_argument("input_file", nargs="?")
-    parser.add_argument("-o", "--output-file")
-    parser.add_argument("--csl-style", default=DEFAULT_SETTINGS["csl_style"])
+    parser = argparse.ArgumentParser(
+        description=f"PyRefPmid v{__version__}",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("input_file", nargs="?", help="Input Markdown file")
+    parser.add_argument("-o", "--output-file", help="Output Markdown file path")
+
+    # デフォルト値取得用のダミーインスタンス (env var 等を評価済み)
+    dummy_settings = GlobalSettings()
+
+    # GlobalSettings から引数を自動生成
+    for f in fields(GlobalSettings):
+        arg_name = f"--{f.name.replace('_', '-')}"
+        if f.name in ["input_file", "output_file"]: continue
+
+        # ダミーインスタンスから現在の値を取得
+        current_val = getattr(dummy_settings, f.name)
+        
+        # 型の決定
+        if f.default is not MISSING and f.default is not None:
+            f_type = type(f.default)
+        elif f.default_factory is not MISSING:
+            f_type = type(current_val) if current_val is not None else str
+        else:
+            f_type = str
+
+        if f_type is bool:
+            parser.add_argument(arg_name, action=argparse.BooleanOptionalAction, default=current_val)
+        else:
+            parser.add_argument(arg_name, type=f_type if f_type in (int, float) else str, default=current_val)
+
     args = parser.parse_args()
 
     in_p = Path(args.input_file) if args.input_file else _select_file_generic("md", "Markdown")
     if not in_p or not in_p.exists(): return 1
 
-    settings = GlobalSettings(csl_style=_resolve_csl_style(args.csl_style))
+    # 引数から GlobalSettings を構築
+    settings_kwargs = {f.name: getattr(args, f.name) for f in fields(GlobalSettings) if hasattr(args, f.name)}
+    # スタイル解決のみ個別に実行
+    settings_kwargs["csl_style"] = _resolve_csl_style(settings_kwargs["csl_style"])
+
+    settings = GlobalSettings(**settings_kwargs)
     out_p = Path(args.output_file) if args.output_file else in_p.with_name(f"{in_p.stem}_cited{in_p.suffix}")
     return 0 if ReferenceBuilder(in_p, out_p, settings, in_p.with_suffix(".json")).build() else 1
 
