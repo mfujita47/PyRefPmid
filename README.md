@@ -1,4 +1,4 @@
-# 📚 PyRefPmid: Markdown PubMed Referencer (v3.1.0)
+# 📚 PyRefPmid: Markdown PubMed Referencer (v3.1.1)
 
 **PyRefPmid** は、Markdown 原稿内の PubMed ID (PMID) を自動検出し、PubMed API から書誌情報を取得して参考文献リスト (References) を自動生成する Python スクリプトです。**NCBI Literature Citation API** を採用し、高速で正確な引用生成が可能です。
 
@@ -7,7 +7,8 @@
 - 📡 **公式 Citation API 対応**: PubMed 公式の Literature Citation API を利用してデータを取得。
 - 🎨 **CSL スタイルサポート**: `citeproc-py` を搭載。APA, IEEE, Vancouver, Nature など、数千種類以上の引用スタイルに対応。
 - 🔄 **スマート・グルーピング**: 連続する PMID タグ（スペースや改行を挟む場合を含む）を自動的に検出し、`[1-3]` や `(Smith, 2023; Jones, 2024)` のように最適にグループ化。
-- 📋 **堅牢なエラー表示**: 存在しない PMID やフェッチエラーが発生した場合も、文献リストにエラー内容を明示し、番号付けの一貫性を維持。
+- 📋 **既存構成の維持**: 文書内に既に `References` などの見出しがある場合、その章番号やレベル（`## 8. References` など）を維持したまま内容を更新。
+- ⚡ **究極のパフォーマンス**: 単一パス走査アルゴリズムとオンデマンド・データ処理により、大規模な文書でも瞬時に処理。
 - 📂 **スマートファイル選択**: フォルダ内のファイルを自動検出。複数ある場合はメニュー選択や GUI ダイアログを利用可能。
 
 ## 📦 必要なもの
