@@ -535,8 +535,8 @@ class CiteprocFormatter:
             s = str(item).strip()
             # 1. IEEEなどで "Nameand Name" のようになる現象への対策
             s = re.sub(r"([^\s,])and\s", r"\1 and ", s)
-            # 2. "[1]Author" or "1.Author" -> "[1] Author" or "1. Author"
-            s = re.sub(r"(\[?\d+\]?\.?)([^\s])", r"\1 \2", s)
+            # 2. "[1]Author" or "1.Author" -> "[1] Author" or "1. Author" (行頭の文献番号のみに限定)
+            s = re.sub(r"^(\[?\d+\]?\.?)([^\s])", r"\1 \2", s)
             # 3. "M.&" or ",&" -> "M. &" or ", &" (APAなど)
             s = re.sub(r"([.,])([&])", r"\1 \2", s)
             # 4. ", ." -> "." (Suffixなどの後の不要なカンマ)
