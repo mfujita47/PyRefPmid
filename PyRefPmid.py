@@ -646,14 +646,15 @@ def _select_file_gui(extension: str, label: str) -> Path | None:
 def _select_file_generic(
     extension: str,
     label: str,
-    auto_select: bool = True
+    auto_select: bool = True,
+    show_gui_if_none: bool = True
 ) -> Path | None:
     """共通のファイル選択ロジック (CLI/GUI)"""
     cwd = Path.cwd()
     candidates = list(cwd.glob(f"*.{extension}"))
 
     if not candidates:
-        return _select_file_gui(extension, label)
+        return _select_file_gui(extension, label) if show_gui_if_none else None
 
     if auto_select and len(candidates) == 1:
         target = candidates[0]
@@ -750,7 +751,7 @@ def main() -> int:
 
     # CSL Style handling
     csl_style = args.csl_style
-    
+
     # ローカルにあるか確認 (直接パス, .csl付与, 大文字小文字無視)
     local_path = None
     if Path(csl_style).exists() and Path(csl_style).is_file():
@@ -768,8 +769,8 @@ def main() -> int:
     else:
         # ローカルにない場合
         if csl_style == DEFAULT_SETTINGS["csl_style"]:
-            # デフォルトかつ存在しない場合、まず他のローカルファイルを提案
-            selected_csl = _select_file_generic("csl", "CSL Style")
+            # デフォルトかつ存在しない場合、まず他のローカルファイルを提案（GUIは出さない）
+            selected_csl = _select_file_generic("csl", "CSL Style", show_gui_if_none=False)
             if selected_csl:
                 csl_style = str(selected_csl)
             else:
