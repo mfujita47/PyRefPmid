@@ -14,7 +14,7 @@ Requirements:
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "3.0.0"
 __author__ = "mfujita47 (Mitsugu Fujita)"
 
 import argparse
@@ -35,15 +35,25 @@ except ImportError:
     print("Error: 'requests' library is missing. Please install it via 'pip install requests'.")
     sys.exit(1)
 
+try:
+    from citeproc import (
+        CitationStylesStyle,
+        CitationStylesBibliography,
+        Citation,
+        CitationItem,
+        formatter,
+    )
+    from citeproc.source.json import CiteProcJSON
+except ImportError:
+    print("Error: 'citeproc-py' library is missing. Please install it via 'pip install citeproc-py'.")
+    sys.exit(1)
+
 @dataclass(frozen=True)
 class GlobalSettings:
 
     pmid_regex_pattern: str = r"(?i)\[pm(?:id)?:?\s*(\d+)\](?:\([^)]*\))?"
-    author_threshold: int = 0
-    author_display_count: int = 0  # threshold超過時に表示する著者数 (0 = thresholdと同値)
-    citation_format: str = "({number})"
-    author_name_format: str = "{last} {initials}"
-    reference_item_format: str = "{number}. {authors}. {title} {journal} {year};{volume}({issue}):{pages}. doi: {doi}. [{pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)"
+    csl_style: str = "apa"
+    csl_locale: str = "en-US"
     references_header: str = "References"
     api_base_url: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     api_key: str | None = "3a88fc215344206ea89f04981d824c4ca608"
@@ -84,6 +94,48 @@ class ArticleMetadata:
         if "authors_list" in filtered_data and not isinstance(filtered_data["authors_list"], list):
             filtered_data["authors_list"] = []
         return cls(**filtered_data)
+
+    def to_csl_json(self) -> dict[str, Any]:
+        """Convert metadata to CSL-JSON format for citeproc-py."""
+        authors = []
+        for name in self.authors_list:
+            if "," in name:
+                parts = [p.strip() for p in name.split(",", 1)]
+                authors.append({"family": parts[0], "given": parts[1]})
+            else:
+                parts = name.rsplit(" ", 1)
+                if len(parts) == 2:
+                    surname, initials = parts
+                    if initials.isupper() and len(initials) <= 3:
+                        # Split initials (e.g., "MK" -> "M. K.") for better CSL handling
+                        given = " ".join(list(initials))
+                        authors.append({"family": surname, "given": given})
+                    else:
+                        authors.append({"family": name, "given": ""})
+                else:
+                    authors.append({"family": name, "given": ""})
+
+        csl: dict[str, Any] = {
+            "id": self.pmid,
+            "type": "article-journal",
+            "title": self.title,
+            "container-title": self.journal,
+            "volume": self.volume,
+            "issue": self.issue,
+            "page": self.pages,
+            "DOI": self.doi,
+        }
+        if self.year:
+            try:
+                # Year can be "2023 Oct" or just "2023"
+                clean_year = re.search(r"\d{4}", self.year)
+                if clean_year:
+                    csl["issued"] = {"date-parts": [[int(clean_year.group())]]}
+            except (ValueError, AttributeError):
+                pass
+        if authors:
+            csl["author"] = authors
+        return csl
 
 class RateLimiter:
     """APIレート制限を管理するスレッドセーフなクラス"""
@@ -339,99 +391,97 @@ class CitationParser:
     def find_reference_section(self, content: str) -> re.Match | None:
         return self.remove_refs_regex.search(content)
 
-class ReferenceFormatter:
+class CiteprocFormatter:
+    """CSL (citeproc-py) を使用した文献フォーマッタ"""
 
-    def __init__(self, settings: GlobalSettings):
+    def __init__(self, settings: GlobalSettings, details_map: dict[PMID, ArticleMetadata]):
         self.settings = settings
+        self.details_map = details_map
 
-    def _parse_name(self, raw_name: str) -> dict[str, str]:
-        data = {
-            "name": raw_name,
-            "last": raw_name,
-            "initials": "",
-        }
-        parts = raw_name.rsplit(" ", 1)
-        if len(parts) == 2:
-            surname, initials = parts
-            if initials.isupper() and len(initials) <= 3:
-                data["last"] = surname
-                data["initials"] = initials
-        return data
+        # 有効なメタデータのみを CSL-JSON 形式に変換
+        csl_data = [
+            meta.to_csl_json()
+            for meta in details_map.values()
+            if meta.is_valid
+        ]
+        self.bib_source = CiteProcJSON(csl_data)
 
-    def _format_single_author(self, raw_name: str) -> str:
-        if self.settings.author_name_format == "{name}":
-            return raw_name
-        data = self._parse_name(raw_name)
-        
-        fmt = self.settings.author_name_format
-        initials = data.get("initials", "")
-        
-        # {initials}直後の文字を取得し、各イニシャルに適用する
-        if initials:
-            match = re.search(r"\{initials\}([^a-zA-Z0-9\s{}])", fmt)
-            if match:
-                sep = match.group(1)
-                # 各文字の後にセパレータを挿入
-                smart_initials = "".join(f"{c}{sep}" for c in initials)
-                data["initials"] = smart_initials
-                # 重複を避けるため、フォーマット文字列から直後のセパレータを一時的に除去
-                fmt = fmt.replace(f"{{initials}}{sep}", "{initials}")
+        # スタイルファイルの探索
+        style_name = settings.csl_style
+        style_path = self._find_style_file(style_name)
 
         try:
-            return fmt.format(**data)
-        except Exception:
-            return raw_name
+            self.style = CitationStylesStyle(str(style_path), validate=False)
+        except Exception as e:
+            print(f"Error loading CSL style '{style_name}': {e}")
+            sys.exit(1)
 
-    def _format_authors(self, authors_list: list[str]) -> str:
-        formatted_authors = [self._format_single_author(a) for a in authors_list]
-        thresh = self.settings.author_threshold
-        if thresh > 0 and len(formatted_authors) > thresh:
-            display = self.settings.author_display_count or thresh
-            return ", ".join(formatted_authors[:display]) + ", et al"
-        return ", ".join(formatted_authors)
+        self.bibliography = CitationStylesBibliography(
+            self.style, self.bib_source, formatter.plain
+        )
 
-    def _format_ranges(self, numbers: list[int]) -> str:
-        if not numbers:
-            return ""
-        numbers = sorted(set(numbers))
-        ranges = []
-        start = end = numbers[0]
+    def _find_style_file(self, style_name: str) -> Path:
+        """スタイル名から .csl ファイルを探す"""
+        # 1. 直接パス指定
+        p = Path(style_name)
+        if p.exists() and p.is_file():
+            return p
+        # 2. .csl 拡張子を付与
+        p = Path(f"{style_name}.csl")
+        if p.exists():
+            return p
+        # 3. カレントディレクトリ内の .csl を探す (名前が一致するもの)
+        for csl in Path.cwd().glob("*.csl"):
+            if csl.stem.lower() == style_name.lower():
+                return csl
 
-        def append_range():
-            if end > start + 1:
-                ranges.append(f"{start}-{end}")
-            elif end == start + 1:
-                ranges.append(f"{start},{end}")
-            else:
-                ranges.append(str(start))
-
-        for n in numbers[1:]:
-            if n == end + 1:
-                end = n
-            else:
-                append_range()
-                start = end = n
-        append_range()
-        return ",".join(ranges)
+        # フォールバック: 指定がない場合はエラーにするかデフォルトを探す
+        # ここではエラーメッセージを出して終了する
+        print(f"Error: CSL style file '{style_name}' or '{style_name}.csl' not found.")
+        print("Please provide a valid .csl file or ensure it exists in the current directory.")
+        sys.exit(1)
 
     def replace_citations(
         self,
         content: str,
         pmid_groups: list[tuple[list[PMID], tuple[int, int]]],
-        pmid_map: dict[PMID, int],
     ) -> str:
+        """本文中の PMID タグを CSL フォーマットの引用符に置換する"""
+        if not pmid_groups:
+            return content
+
+        def on_nonexistent_item(item_id):
+            print(f"  [Warning] Item {item_id} not found in metadata.")
+
+        # 引用を登録
+        registered_citations = []
+        for group_pmids, _ in pmid_groups:
+            items = [
+                CitationItem(pmid)
+                for pmid in group_pmids
+                if pmid in self.details_map and self.details_map[pmid].is_valid
+            ]
+            if items:
+                cit = Citation(items)
+                self.bibliography.register(cit)
+                registered_citations.append(cit)
+            else:
+                registered_citations.append(None)
+
+        # 置換処理
         new_parts = []
         last_end = 0
 
-        for group_pmids, (start, end) in pmid_groups:
-            nums = [pmid_map[p] for p in group_pmids if p in pmid_map]
-            formatted_nums = self._format_ranges(nums)
-
+        for i, (group_pmids, (start, end)) in enumerate(pmid_groups):
             new_parts.append(content[last_end:start])
-            if formatted_nums:
-                new_parts.append(
-                    self.settings.citation_format.replace("{number}", formatted_nums)
-                )
+            cit = registered_citations[i]
+            if cit:
+                try:
+                    formatted = self.bibliography.cite(cit, on_nonexistent_item)
+                    new_parts.append(str(formatted))
+                except Exception as e:
+                    print(f"  [Error] Failed to format citation for {group_pmids}: {e}")
+                    new_parts.append(content[start:end])
             else:
                 new_parts.append(content[start:end])
             last_end = end
@@ -439,46 +489,31 @@ class ReferenceFormatter:
         new_parts.append(content[last_end:])
         return "".join(new_parts)
 
-    def create_section(
-        self,
-        pmid_map: dict[PMID, int],
-        details_map: dict[PMID, ArticleMetadata],
-        header_level: int,
-    ) -> str:
-        if not details_map:
-            return ""
+    def create_section(self, header_level: int) -> str:
+        """参考文献リストセクションを生成する"""
+        bib_items = []
 
-        items = []
-        for pmid, number in pmid_map.items():
-            meta = details_map.get(pmid)
-            if meta and meta.is_valid:
-                authors_str = self._format_authors(meta.authors_list)
-                try:
-                    formatted_item = self.settings.reference_item_format.format(
-                        number=number,
-                        authors=authors_str,
-                        title=meta.title,
-                        journal=meta.journal,
-                        year=meta.year,
-                        volume=meta.volume,
-                        issue=meta.issue,
-                        pages=meta.pages,
-                        doi=meta.doi,
-                        pmid=meta.pmid,
-                    )
-                    formatted_item = formatted_item.replace("..", ".")
-                    items.append(formatted_item)
-                except Exception:
-                    items.append(f"{number}. [PMID {pmid}] - Format Error")
-            else:
-                reason = meta.error if meta else "Load Error"
-                items.append(f"{number}. [PMID {pmid}] - Get Error ({reason})")
+        # citeproc-py の bibliography() はイテレータを返し、各要素は文字列化可能
+        for item in self.bibliography.bibliography():
+            s = str(item)
+            # 1. IEEEなどで "Nameand Name" のようになる現象への対策
+            s = re.sub(r"([^\s,])and\s", r"\1 and ", s)
+            # 2. "[1]Author" -> "[1] Author"
+            s = re.sub(r"(\[\d+\])([^\s])", r"\1 \2", s)
+            # 3. "M.&" or ",&" -> "M. &" or ", &" (APAなど)
+            s = re.sub(r"([.,])([&])", r"\1 \2", s)
+            # 4. ", ." -> "." (Suffixなどの後の不要なカンマ)
+            s = s.replace(", .", ".")
+            # 5. 二重ピリオド
+            s = s.replace("..", ".")
+            
+            bib_items.append(s)
 
-        if not items:
+        if not bib_items:
             return ""
 
         header = "#" * header_level + " " + self.settings.references_header
-        return f"{header}\n\n" + "\n".join(items)
+        return f"{header}\n\n" + "\n".join(bib_items)
 
 class ReferenceBuilder:
 
@@ -495,7 +530,6 @@ class ReferenceBuilder:
         self.client = PubMedClient(self.settings)
         self.cache = CacheManager(cache_path, self.settings.use_cache)
         self.parser = CitationParser(self.settings)
-        self.formatter = ReferenceFormatter(self.settings)
 
     def build(self) -> bool:
         print(f"Processing: {self.input_path}")
@@ -510,14 +544,14 @@ class ReferenceBuilder:
         pre_content, post_content, insertion_mode = self._split_content(content)
         scan_target = pre_content + post_content
 
-        # 2. Parse
+        # 2. Parse PMIDs
         pmid_groups, pmid_map = self.parser.extract_pmids(scan_target)
         if not pmid_map:
             print("No PMIDs found in the document.")
             self._copy_if_needed(content)
             return True
 
-        # 3. Fetch (Cache -> API)
+        # 3. Fetch Metadata (Cache -> API)
         pmids = list(pmid_map.keys())
         cached_details, missing = self.cache.get_missing(pmids)
 
@@ -528,7 +562,10 @@ class ReferenceBuilder:
 
         final_details = {**cached_details, **api_details}
 
-        # 4. Replace
+        # 4. Initialize Citeproc Formatter
+        formatter = CiteprocFormatter(self.settings, final_details)
+
+        # 5. Replace Citations
         split_point = len(pre_content)
         pre_groups = []
         post_groups = []
@@ -543,14 +580,14 @@ class ReferenceBuilder:
             else:
                 pre_groups.append((pmid_list, span))
 
-        new_pre = self.formatter.replace_citations(pre_content, pre_groups, pmid_map)
-        new_post = self.formatter.replace_citations(post_content, post_groups, pmid_map)
+        new_pre = formatter.replace_citations(pre_content, pre_groups)
+        new_post = formatter.replace_citations(post_content, post_groups)
 
-        # 5. Create section
+        # 6. Create References Section
         header_level = self.parser.detect_header_level(scan_target)
-        ref_section = self.formatter.create_section(pmid_map, final_details, header_level)
+        ref_section = formatter.create_section(header_level)
 
-        # 6. Combine
+        # 7. Combine
         if ref_section:
             if insertion_mode == "append":
                 final_content = new_pre.rstrip() + "\n\n" + ref_section + "\n" + new_post
@@ -559,7 +596,7 @@ class ReferenceBuilder:
         else:
             final_content = new_pre + new_post
 
-        # 7. Save
+        # 8. Save
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
             self.output_path.write_text(final_content, encoding="utf-8")
@@ -644,23 +681,17 @@ def _select_input_file() -> Path | None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="PyRefPmid - Hybrid PubMed Reference Generator",
+        description="PyRefPmid - CSL-based PubMed Reference Generator",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("input_file", nargs="?", help="Input Markdown file path")
     parser.add_argument("-o", "--output-file", help="Output file path")
 
     parser.add_argument("--pmid-regex", default=DEFAULT_SETTINGS["pmid_regex_pattern"])
-    parser.add_argument("--author-threshold", type=int, default=DEFAULT_SETTINGS["author_threshold"])
-    parser.add_argument("--author-display", type=int, default=DEFAULT_SETTINGS["author_display_count"],
-                        help="Number of authors to show when exceeding threshold (0 = same as threshold)")
-    parser.add_argument("--citation-format", default=DEFAULT_SETTINGS["citation_format"])
-    parser.add_argument("--ref-item-format", default=DEFAULT_SETTINGS["reference_item_format"])
-    parser.add_argument(
-        "--author-name-format",
-        default=DEFAULT_SETTINGS["author_name_format"],
-        help="Format for author names (e.g. '{last}, {initials}')",
-    )
+    parser.add_argument("--csl-style", default=DEFAULT_SETTINGS["csl_style"],
+                        help="CSL style name or path to .csl file (default: apa)")
+    parser.add_argument("--csl-locale", default=DEFAULT_SETTINGS["csl_locale"],
+                        help="CSL locale (default: en-US)")
     parser.add_argument("--api-key", default=DEFAULT_SETTINGS["api_key"])
     parser.add_argument("--references-header", default=DEFAULT_SETTINGS["references_header"])
     parser.add_argument("--cache-file", default=None)
@@ -695,14 +726,11 @@ def main() -> int:
     else:
         output_path = input_path.with_name(f"{input_path.stem}_cited{input_path.suffix}")
 
-    # Build Settings - args already contain defaults from argparse
+    # Build Settings
     settings = GlobalSettings(
         pmid_regex_pattern=args.pmid_regex,
-        author_threshold=args.author_threshold,
-        author_display_count=args.author_display,
-        citation_format=args.citation_format,
-        reference_item_format=args.ref_item_format,
-        author_name_format=args.author_name_format,
+        csl_style=args.csl_style,
+        csl_locale=args.csl_locale,
         references_header=args.references_header,
         api_key=args.api_key,
         max_workers=args.max_workers,

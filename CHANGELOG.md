@@ -5,6 +5,22 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [3.0.0] - 2026-03-10
+
+### 追加
+
+- **CSL (Citation Style Language) の全面サポート**:
+  - `citeproc-py` を導入し、世界中の学術雑誌規定（APA, IEEE, Nature, Frontiers 等）に準拠した引用・参考文献生成が可能に。
+  - `--csl-style` オプションを追加。スタイル名（`apa` など）や `.csl` ファイルのパスを指定可能。
+  - `--csl-locale` オプションを追加。
+
+### 変更
+
+- **フォーマットエンジンの刷新**:
+  - 独自実装の `ReferenceFormatter` を廃止し、業界標準の `citeproc-py` エンジンへ移行。
+- **コマンドライン引数の整理**:
+  - 旧来の独自フォーマット引数 (`--author-name-format`, `--author-threshold` 等) を削除し、CSL スタイルによる一括管理へ移行。
+
 ## [2.3.0] - 2026-03-10
 
 ### 追加
