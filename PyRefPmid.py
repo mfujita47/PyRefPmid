@@ -710,25 +710,35 @@ def parse_args() -> argparse.Namespace:
 
 def _download_csl(style_name: str) -> Path | None:
     """指定された CSL スタイルを公式リポジトリからダウンロードする"""
-    # 拡張子を除去してベース名を取得
     base_name = style_name.replace(".csl", "").lower()
     target_path = Path(f"{base_name}.csl")
 
-    url = f"https://raw.githubusercontent.com/citation-style-language/styles/master/{base_name}.csl"
-    print(f"Style '{base_name}' not found locally. Trying to download from: {url}")
+    # 試行する URL リスト
+    urls = [
+        f"https://raw.githubusercontent.com/citation-style-language/styles/master/{base_name}.csl",
+        f"https://raw.githubusercontent.com/citation-style-language/styles/master/dependent/{base_name}.csl",
+    ]
+
     try:
         import requests
-        resp = requests.get(url, timeout=15)
-        if resp.status_code == 404:
-            print(f"Error: Style '{base_name}' not found in the official CSL repository.")
-            return None
-        resp.raise_for_status()
-        # OS によらず LF で保存
-        target_path.write_text(resp.text, encoding="utf-8", newline="\n")
-        print(f"✓ Downloaded: {target_path.name}")
-        return target_path
+        for url in urls:
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    # OS によらず LF で保存
+                    target_path.write_text(resp.text, encoding="utf-8", newline="\n")
+                    print(f"✓ Downloaded '{base_name}' from: {url}")
+                    return target_path
+            except requests.RequestException:
+                continue
+        
+        print(f"Error: Style '{base_name}' not found in the official CSL repository.")
+        print("Checked:")
+        for url in urls:
+            print(f"  - {url}")
+        return None
     except Exception as e:
-        print(f"Error: Failed to download CSL '{base_name}': {e}")
+        print(f"Error: An unexpected error occurred during download: {e}")
         return None
 
 def main() -> int:
@@ -751,37 +761,34 @@ def main() -> int:
 
     # CSL Style handling
     csl_style = args.csl_style
+    is_default = (csl_style == DEFAULT_SETTINGS["csl_style"])
 
-    # ローカルにあるか確認 (直接パス, .csl付与, 大文字小文字無視)
-    local_path = None
+    # 1. 直接パス指定された実在ファイルがある場合はそれを使用
     if Path(csl_style).exists() and Path(csl_style).is_file():
-        local_path = Path(csl_style)
-    elif Path(f"{csl_style}.csl").exists():
-        local_path = Path(f"{csl_style}.csl")
+        pass
+    # 2. デフォルト設定の場合: カレントディレクトリの全 .csl から選択
+    elif is_default:
+        selected = _select_file_generic("csl", "CSL Style", show_gui_if_none=False)
+        if selected:
+            csl_style = str(selected)
+        else:
+            # 候補がない、または選択されなかった場合はデフォルトのダウンロード試行
+            downloaded = _download_csl(csl_style)
+            if downloaded:
+                csl_style = str(downloaded)
+            else:
+                return 1
+    # 3. 名前のみ明示指定された場合: ローカル一致を探し、なければダウンロード
     else:
+        local_match = None
         for csl in Path.cwd().glob("*.csl"):
             if csl.stem.lower() == csl_style.lower():
-                local_path = csl
+                local_match = csl
                 break
-
-    if local_path:
-        csl_style = str(local_path)
-    else:
-        # ローカルにない場合
-        if csl_style == DEFAULT_SETTINGS["csl_style"]:
-            # デフォルトかつ存在しない場合、まず他のローカルファイルを提案（GUIは出さない）
-            selected_csl = _select_file_generic("csl", "CSL Style", show_gui_if_none=False)
-            if selected_csl:
-                csl_style = str(selected_csl)
-            else:
-                # 他になければダウンロード試行
-                downloaded = _download_csl(csl_style)
-                if downloaded:
-                    csl_style = str(downloaded)
-                else:
-                    return 1
+        
+        if local_match:
+            csl_style = str(local_match)
         else:
-            # 明示指定されたスタイルがない場合はダウンロード試行
             downloaded = _download_csl(csl_style)
             if downloaded:
                 csl_style = str(downloaded)
