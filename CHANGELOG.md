@@ -5,21 +5,22 @@
 形式は [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) に基づいており、
 このプロジェクトは [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に準拠しています。
 
+## [3.1.0] - 2026-04-26
+
+### 追加
+
+- **NCBI Literature Citation API への移行**:
+  - PubMed `esummary` から公式の `ctxp` エンドポイントへ変更。
+  - 最初から完全な CSL-JSON を取得することで、従来のパースエラーを完全に解消。
+
 ## [3.0.0] - 2026-03-10
 
 ### 追加
 
-- **CSL (Citation Style Language) の全面サポート**:
+- **CSL (Citation Style Language) システムへの移行**:
   - `citeproc-py` を導入し、世界中の学術雑誌規定（APA, IEEE, Nature, Frontiers 等）に準拠した引用・参考文献生成が可能に。
   - `--csl-style` オプションを追加。スタイル名（`apa` など）や `.csl` ファイルのパスを指定可能。
   - `--csl-locale` オプションを追加。
-
-### 変更
-
-- **フォーマットエンジンの刷新**:
-  - 独自実装の `ReferenceFormatter` を廃止し、業界標準の `citeproc-py` エンジンへ移行。
-- **コマンドライン引数の整理**:
-  - 旧来の独自フォーマット引数 (`--author-name-format`, `--author-threshold` 等) を削除し、CSL スタイルによる一括管理へ移行。
 
 ## [2.3.0] - 2026-03-10
 
@@ -45,23 +46,14 @@
 - **設定管理の一元化**:
   - `GlobalSettings` データクラスをデフォルト値の唯一の定義場所とし、`DEFAULT_SETTINGS` はそこから自動生成。
   - `parse_args` と `main` での冗長な `or DEFAULT_SETTINGS[...]` パターンを削除。
-- **コードの簡潔化**:
-  - ネストした `if` 文を統合。
-  - 重複した `.get()` 呼び出しを変数化。
-- **構造の改善**:
-  - `GlobalSettings` をスクリプト上部に移動し、設定変更を容易化。
 
 ## [2.0.0] - 2026-02-03
 
 ### 追加
 
-- **並列処理とパフォーマンス**:
+- **並列処理の実装**:
   - `concurrent.futures.ThreadPoolExecutor` による並列フェッチを実装。
   - APIキーの有無に応じたインテリジェントなレート制限（APIキーありで ~10req/s）。
-- **出力挙動の洗練**:
-  - デフォルトで `_cited.md` を出力し、既存の参考文献セクションをクリーンに再生成。
-- **コード品質の向上**:
-  - 全体的なクラス設計の見直し、型ヒントの徹底、冗長な依存関係の削除。
 
 ## [1.3.0] - 2026-02-02
 
@@ -108,10 +100,6 @@
 - 不要なインポートを削除し、コードベースを整理。
 - `ask_for_file` ユーティリティ関数を `main` 関数の近くに移動し、構成を整理。
 
-### 修正
-
-- 辞書型のデータ構造をデータクラスに置き換えることで、タイプミスによる実行時エラーのリスクを低減。
-
 ## [1.0.0] - 2025-05-22
 
 ### 追加
@@ -126,17 +114,12 @@
 
 ### 変更
 
-- 可読性、保守性、パフォーマンスを向上させるため、`PyRefPmid.py` スクリプトを大幅にリファクタリング。
 - 引用処理を最適化:
   - `extract_pmid_groups` が各 PMID グループのスパン情報を返すように変更。
   - `replace_citations` を更新し、このスパン情報を使用してテキスト内引用をより正確かつ効率的に置換するように変更。
 - `PubMedProcessor.process_file` メソッドのシグネチャを更新し、`Path` オブジェクトを受け入れるように変更。
 - デフォルトの参考文献アイテム形式 (`DEFAULT_REFERENCE_ITEM_FORMAT`) を更新し、クリック可能な PubMed リンクを含むように変更: `[{pubmed_id}](https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/)`。
 - `README.md` を更新し、詳細な使用方法、キャッシュに関する情報、コマンドライン引数、ライセンス、および変更履歴へのリンクを追加。
-
-### 削除
-
-- 冗長な `extract_pmids` メソッドを削除。その機能は `extract_pmid_groups` に統合。
 
 ### 修正
 
