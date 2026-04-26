@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PyRefPmid - Markdown PubMed Referencer (Refined v3.1.1)
+PyRefPmid - Markdown PubMed Referencer (v3.1.1)
 
 Description:
     Markdown ファイル内の PMID を検出し、NCBI Literature Citation API を利用して
@@ -49,7 +49,7 @@ class GlobalSettings:
     csl_locale: str = "en-US"
     references_header: str = "References"
     api_base_url: str = "https://api.ncbi.nlm.nih.gov/lit/ctxp/v1/pubmed/"
-    api_key: str | None = "3a88fc215344206ea89f04981d824c4ca608"
+    api_key: str | None = ""
     api_timeout: float = 15.0
     max_workers: int = 5
     use_cache: bool = True
@@ -136,6 +136,12 @@ class CacheManager:
                     self.data = {k: ArticleMetadata.from_dict(v) for k, v in raw.items()}
             except Exception: print("Warning: Cache load failed.")
 
+    def get_missing(self, unique_pmids: Iterable[PMID]) -> tuple[dict[PMID, ArticleMetadata], set[PMID]]:
+        """キャッシュ済みのデータと不足しているPMIDを分類して返す"""
+        cached = {p: self.data[p] for p in unique_pmids if p in self.data}
+        missing = {p for p in unique_pmids if p not in self.data}
+        return cached, missing
+
     def save(self):
         if not self.use_cache: return
         try:
@@ -147,7 +153,7 @@ class CacheManager:
 class CitationProcessor:
     def __init__(self, settings: GlobalSettings, details_map: dict[PMID, ArticleMetadata]):
         self.settings, self.details_map = settings, details_map
-        
+
         csl_data = [m.to_csl_json() for m in details_map.values()]
         self.style = CitationStylesStyle(str(self._find_style(settings.csl_style)), validate=False)
         self.bibliography = CitationStylesBibliography(self.style, CiteProcJSON(csl_data), formatter.plain)
@@ -163,65 +169,81 @@ class CitationProcessor:
 
     def process(self, content: str, matches: list[re.Match]) -> str:
         """PMIDマッチ情報を受け取り、グルーピングと引用置換を一気に行う"""
-        # 1. 連番マップ作成 (出現順)
-        unique_pmids = []
-        seen = set()
+        if not matches:
+            return content
+
+        # 1. PMIDの出現順マップ作成とグルーピングを1パスで実行
+        unique_pmids, seen_pmids = [], set()
+        groups: list[list[re.Match]] = []
+        current_group: list[re.Match] = []
+
         for m in matches:
             p = m.group(1)
-            if p not in seen: unique_pmids.append(p); seen.add(p)
-        pmid_map = {p: i + 1 for i, p in enumerate(unique_pmids)}
+            if p not in seen_pmids:
+                unique_pmids.append(p); seen_pmids.add(p)
 
-        # 2. グルーピング (空白を挟むマッチを結合)
-        groups: list[list[re.Match]] = []
-        if matches:
-            current_group = [matches[0]]
-            for i in range(1, len(matches)):
-                prev, curr = matches[i-1], matches[i]
-                if content[prev.end():curr.start()].strip() == "":
-                    current_group.append(curr)
+            if not current_group:
+                current_group.append(m)
+            else:
+                prev = current_group[-1]
+                # 空白のみで隣接するマッチを同じグループにまとめる
+                if content[prev.end():m.start()].strip() == "":
+                    current_group.append(m)
                 else:
-                    groups.append(current_group); current_group = [curr]
+                    groups.append(current_group); current_group = [m]
+        if current_group:
             groups.append(current_group)
 
-        # 3. 引用登録と組み立て
-        registered = {}
-        for grp in groups:
-            pmids = sorted([m.group(1) for m in grp], key=int)
-            items = [CitationItem(p) for p in pmids if p in self.details_map]
-            if items:
-                cit = Citation(items); self.bibliography.register(cit)
-                registered[id(grp[0])] = cit
+        pmid_map = {p: i + 1 for i, p in enumerate(unique_pmids)}
 
+        # 2. 結果の組み立てと引用登録
         result, last_pos = [], 0
         for grp in groups:
             start, end = grp[0].start(), grp[-1].end()
-            pmids = [m.group(1) for m in grp]
             result.append(content[last_pos:start])
-            
+
+            pmids = [m.group(1) for m in grp]
             c_str = ""
-            if self.is_num:
-                nums = sorted([pmid_map[p] for p in pmids if p in pmid_map])
-                if nums:
-                    c_str = f"[{nums[0]}-{nums[-1]}]" if len(nums) > 2 and nums[-1]-nums[0] == len(nums)-1 else f"[{','.join(map(str, nums))}]"
-            
-            if not c_str and id(grp[0]) in registered:
-                try: c_str = str(self.bibliography.cite(registered[id(grp[0])], lambda x: None))
-                except Exception: pass
-            
+
+            # citeproc-py に引用を登録（参考文献リスト生成に必要）
+            items = [CitationItem(p) for p in pmids if p in self.details_map]
+            if items:
+                cit = Citation(items); self.bibliography.register(cit)
+
+                # 数値型スタイルの場合は簡略表記 ([1-3] など) を優先
+                if self.is_num:
+                    nums = sorted([pmid_map[p] for p in pmids if p in pmid_map])
+                    if nums:
+                        if len(nums) > 2 and nums[-1] - nums[0] == len(nums) - 1:
+                            c_str = f"[{nums[0]}-{nums[-1]}]"
+                        else:
+                            c_str = f"[{','.join(map(str, nums))}]"
+
+                # citeproc-py を使用した正式な引用ラベル生成 (数値型以外)
+                if not c_str:
+                    try:
+                        c_str = str(self.bibliography.cite(cit, lambda x: None))
+                    except Exception: pass
+
             result.append(c_str or content[start:end])
             last_pos = end
-            
+
         result.append(content[last_pos:])
         return "".join(result)
 
     def create_section(self, header_level: int, custom_header: str | None = None) -> str:
+        """参考文献セクションの文字列を生成"""
         bib_items = []
         for item in self.bibliography.bibliography():
-            s = re.sub(r"\s+", " ", "".join(item)).strip()
-            s = re.sub(r"^(\[\d+\]\.?|\d+\.?)(?=[^\s])", r"\1 ", s) # スペース補正
-            s = re.sub(r"\.{2,}", ".", s) # 重複ピリオド
+            # 連続空白、重複ピリオド、番号後のスペース不足を整理
+            s = "".join(item).strip()
+            s = re.sub(r"\s+", " ", s)
+            s = re.sub(r"\.{2,}", ".", s)
+            s = re.sub(r"^(\[?\d+\]?\.?)(?=\S)", r"\1 ", s)
             bib_items.append(s)
-        if not bib_items: return ""
+
+        if not bib_items:
+            return ""
         header = custom_header or f"{'#' * header_level} {self.settings.references_header}"
         return f"{header}\n\n" + "\n\n".join(bib_items) + "\n"
 
@@ -240,7 +262,7 @@ class ReferenceBuilder:
         header_pattern = "|".join(re.escape(h) for h in header_names)
         refs_pattern = re.compile(rf"(?m)^(#+\s+(?:\d+\.\s*)?(?:{header_pattern}))\s*$", re.I)
         match = refs_pattern.search(content)
-        
+
         placeholder = "[[PYREFPMID_REFS_PLACEHOLDER]]"
         existing_header = None
         if match:
@@ -261,14 +283,14 @@ class ReferenceBuilder:
         cached, missing = self.cache.get_missing(unique_pmids)
         if missing:
             self.cache.data.update(self.client.fetch_all(missing)); self.cache.save()
-        
+
         processor = CitationProcessor(self.settings, {p: self.cache.data[p] for p in unique_pmids if p in self.cache.data})
         new_content = processor.process(main_content, pmid_matches)
-        
+
         # 4. 文献リスト生成と挿入
         h_match = re.search(r"^(#+)\s+", content, re.M)
         ref_sec = processor.create_section(len(h_match.group(1)) if h_match else 2, existing_header)
-        
+
         self.out_p.parent.mkdir(parents=True, exist_ok=True)
         self.out_p.write_text(new_content.replace(placeholder, ref_sec), encoding="utf-8", newline="\n")
         print(f"✓ Saved: {self.out_p}"); return True
@@ -295,7 +317,7 @@ def _resolve_csl_style(style: str) -> str:
     if Path(style).exists() or Path(f"{style}.csl").exists(): return style
     local = next((p for p in Path.cwd().glob("*.csl") if p.stem.lower() == style.lower()), None)
     if local: return str(local)
-    
+
     for url in [f"https://raw.githubusercontent.com/citation-style-language/styles/master/{style.lower()}.csl",
                 f"https://raw.githubusercontent.com/citation-style-language/styles/master/dependent/{style.lower()}.csl"]:
         try:
