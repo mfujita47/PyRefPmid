@@ -445,6 +445,7 @@ class CiteprocFormatter:
         self,
         content: str,
         pmid_groups: list[tuple[list[PMID], tuple[int, int]]],
+        pmid_map: dict[PMID, int],
     ) -> str:
         """本文中の PMID タグを CSL フォーマットの引用符に置換する"""
         if not pmid_groups:
@@ -453,7 +454,7 @@ class CiteprocFormatter:
         def on_nonexistent_item(item_id):
             print(f"  [Warning] Item {item_id} not found in metadata.")
 
-        # 引用を登録
+        # 1. 引用を登録
         registered_citations = []
         for group_pmids, _ in pmid_groups:
             items = [
@@ -468,22 +469,58 @@ class CiteprocFormatter:
             else:
                 registered_citations.append(None)
 
-        # 置換処理
+        # 2. 数値スタイルかどうかを簡易判定
+        # (citeproc-py の style オブジェクトから情報を取得)
+        is_numeric = False
+        try:
+            # citation-format が "numeric" か、または bibliography の設定から推測
+            if hasattr(self.style, 'citation_format') and self.style.citation_format == 'numeric':
+                is_numeric = True
+            elif "[" in str(self.bibliography.bibliography().next()): # 1つ目を見て [ があれば数値とみなす
+                is_numeric = True
+        except Exception:
+            # 失敗した場合はスタイル名から推測
+            if any(name in self.settings.csl_style.lower() for name in ["ieee", "vancouver", "nature"]):
+                is_numeric = True
+
+        # 3. 置換処理
         new_parts = []
         last_end = 0
 
         for i, (group_pmids, (start, end)) in enumerate(pmid_groups):
             new_parts.append(content[last_end:start])
+            
+            citation_str = ""
             cit = registered_citations[i]
-            if cit:
-                try:
-                    formatted = self.bibliography.cite(cit, on_nonexistent_item)
-                    new_parts.append(str(formatted))
-                except Exception as e:
-                    print(f"  [Error] Failed to format citation for {group_pmids}: {e}")
-                    new_parts.append(content[start:end])
-            else:
-                new_parts.append(content[start:end])
+            
+            # 数値スタイルの場合は自前で生成することを試みる (citeproc-pyの不安定さを回避)
+            if is_numeric:
+                nums = []
+                for pmid in group_pmids:
+                    if pmid in pmid_map:
+                        nums.append(pmid_map[pmid])
+                
+                if nums:
+                    nums.sort()
+                    # 連続する番号をハイフンで繋ぐ処理 (例: 1,2,3 -> 1-3)
+                    if len(nums) > 2 and nums[-1] - nums[0] == len(nums) - 1:
+                        citation_str = f"[{nums[0]}-{nums[-1]}]"
+                    else:
+                        citation_str = f"[{','.join(map(str, nums))}]"
+            
+            # 数値スタイルでない、または自前生成に失敗した場合は citeproc-py を使用
+            if not citation_str:
+                if cit:
+                    try:
+                        formatted = self.bibliography.cite(cit, on_nonexistent_item)
+                        citation_str = str(formatted)
+                    except Exception as e:
+                        print(f"  [Error] Failed to format citation for {group_pmids}: {e}")
+                
+            if not citation_str:
+                citation_str = content[start:end] # 最終フォールバック
+                
+            new_parts.append(citation_str)
             last_end = end
 
         new_parts.append(content[last_end:])
@@ -582,8 +619,8 @@ class ReferenceBuilder:
             else:
                 pre_groups.append((pmid_list, span))
 
-        new_pre = formatter.replace_citations(pre_content, pre_groups)
-        new_post = formatter.replace_citations(post_content, post_groups)
+        new_pre = formatter.replace_citations(pre_content, pre_groups, pmid_map)
+        new_post = formatter.replace_citations(post_content, post_groups, pmid_map)
 
         # 6. Create References Section
         header_level = self.parser.detect_header_level(scan_target)
