@@ -251,7 +251,11 @@ class CitationProcessor:
         bib_items = []
         for item in self.bibliography.bibliography():
             s = re.sub(r"\s+", " ", "".join(item)).strip()
+            # 文献番号直後のスペース欠落補正
             s = re.sub(r"^(\[\d+\]\.?|\d+\.?)(?=[^\s])", r"\1 ", s)
+            # 重複ピリオドの整理（3つ以上並ぶ場合も考慮して、2つ並びがなくなるまで繰り返す）
+            while ".." in s:
+                s = s.replace("..", ".")
             bib_items.append(s)
         if not bib_items: return ""
         return f"{'#' * header_level} {self.settings.references_header}\n\n" + "\n\n".join(bib_items) + "\n"
@@ -267,10 +271,17 @@ class ReferenceBuilder:
         try: content = self.in_p.read_text(encoding="utf-8")
         except Exception as e: print(f"Error: {e}"); return False
 
-        # 既存セクション削除
+        # 既存セクションの特定
         refs_pattern = re.compile(rf"(?m)^#+\s+(?:\d+\.\s*)?{re.escape(self.settings.references_header)}\s*\n[\s\S]*?(?=\n#+\s+|\Z)", re.I)
         match = refs_pattern.search(content)
-        main_content = (content[:match.start()] + content[match.end():]) if match else content
+        
+        # 文書を分割してスキャン対象を抽出
+        if match:
+            # 既存の References セクションをプレースホルダで置換して位置を固定
+            placeholder = "[[PYREFPMID_REFS_PLACEHOLDER]]"
+            main_content = content[:match.start()] + placeholder + content[match.end():]
+        else:
+            main_content = content
 
         pmids = re.findall(self.settings.pmid_regex_pattern, main_content)
         if not pmids:
@@ -281,16 +292,19 @@ class ReferenceBuilder:
         if missing:
             api_data = self.client.fetch_all(missing)
             self.cache.data.update(api_data); self.cache.save()
-
+        
         processor = CitationProcessor(self.settings, {p: self.cache.data[p] for p in set(pmids) if p in self.cache.data})
         new_content = processor.process(main_content)
-
+        
         h_match = re.search(r"^(#+)\s+", main_content, re.M)
         ref_sec = processor.create_section(len(h_match.group(1)) if h_match else 2)
-
-        final = (new_content.rstrip() + "\n\n" + ref_sec) if not match else \
-                (new_content[:match.start()] + ref_sec + "\n" + new_content[match.start():])
-
+        
+        # プレースホルダに参考文献リストを挿入、なければ末尾に追加
+        if "[[PYREFPMID_REFS_PLACEHOLDER]]" in new_content:
+            final = new_content.replace("[[PYREFPMID_REFS_PLACEHOLDER]]", ref_sec)
+        else:
+            final = new_content.rstrip() + "\n\n" + ref_sec
+        
         self.out_p.parent.mkdir(parents=True, exist_ok=True)
         self.out_p.write_text(final, encoding="utf-8", newline="\n")
         print(f"✓ Saved: {self.out_p}"); return True
