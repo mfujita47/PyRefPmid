@@ -495,7 +495,7 @@ class CiteprocFormatter:
 
         # citeproc-py の bibliography() はイテレータを返し、各要素は文字列化可能
         for item in self.bibliography.bibliography():
-            s = str(item)
+            s = str(item).strip()
             # 1. IEEEなどで "Nameand Name" のようになる現象への対策
             s = re.sub(r"([^\s,])and\s", r"\1 and ", s)
             # 2. "[1]Author" -> "[1] Author"
@@ -506,14 +506,16 @@ class CiteprocFormatter:
             s = s.replace(", .", ".")
             # 5. 二重ピリオド
             s = s.replace("..", ".")
-            
+
             bib_items.append(s)
 
         if not bib_items:
             return ""
 
         header = "#" * header_level + " " + self.settings.references_header
-        return f"{header}\n\n" + "\n".join(bib_items)
+        # Markdownで確実に改行（段落分け）されるよう \n\n で結合する
+        # 末尾にも改行を付与する
+        return f"{header}\n\n" + "\n\n".join(bib_items) + "\n"
 
 class ReferenceBuilder:
 
@@ -599,7 +601,8 @@ class ReferenceBuilder:
         # 8. Save
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
-            self.output_path.write_text(final_content, encoding="utf-8")
+            # OSによらず一貫した改行コード (LF) を使用する
+            self.output_path.write_text(final_content, encoding="utf-8", newline="\n")
             print(f"✓ Saved to: {self.output_path}")
             return True
         except Exception as e:
@@ -620,41 +623,46 @@ class ReferenceBuilder:
     def _copy_if_needed(self, content: str):
         if self.input_path != self.output_path:
             try:
-                self.output_path.write_text(content, encoding="utf-8")
+                self.output_path.write_text(content, encoding="utf-8", newline="\n")
             except Exception:
                 pass
 
-def _select_file_gui() -> Path | None:
+def _select_file_gui(extension: str, label: str) -> Path | None:
+    """GUIファイル選択ダイアログを表示する"""
     try:
         import tkinter as tk
         from tkinter import filedialog
-
         root = tk.Tk()
         root.withdraw()
         filepath = filedialog.askopenfilename(
-            title="Select Markdown File",
-            filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
+            title=f"Select {label} File",
+            filetypes=[(f"{label} files", f"*.{extension}"), ("All files", "*.*")],
         )
         root.destroy()
         return Path(filepath) if filepath else None
     except Exception:
         return None
 
-def _select_input_file() -> Path | None:
+def _select_file_generic(
+    extension: str,
+    label: str,
+    auto_select: bool = True
+) -> Path | None:
+    """共通のファイル選択ロジック (CLI/GUI)"""
     cwd = Path.cwd()
-    candidates = list(cwd.glob("*.md"))
+    candidates = list(cwd.glob(f"*.{extension}"))
 
-    if len(candidates) == 0:
-        return _select_file_gui()
+    if not candidates:
+        return _select_file_gui(extension, label)
 
-    if len(candidates) == 1:
+    if auto_select and len(candidates) == 1:
         target = candidates[0]
-        print(f"Auto-selected file: {target.name}")
+        print(f"Auto-selected {label}: {target.name}")
         return target
 
-    # 複数候補がある場合
+    # 複数候補がある場合または auto_select=False
     if sys.stdin and sys.stdin.isatty():
-        print("Multiple Markdown files found:")
+        print(f"Multiple {label} files found:")
         for i, f in enumerate(candidates, 1):
             print(f"  {i}. {f.name}")
         print("  0. Open File Dialog (GUI)")
@@ -665,19 +673,18 @@ def _select_input_file() -> Path | None:
                 if not choice:
                     continue
                 if choice == "0":
-                    return _select_file_gui()
+                    return _select_file_gui(extension, label)
                 if choice.isdigit():
                     idx = int(choice)
                     if 1 <= idx <= len(candidates):
                         target = candidates[idx - 1]
-                        print(f"Selected: {target.name}")
+                        print(f"Selected {label}: {target.name}")
                         return target
             except (KeyboardInterrupt, EOFError):
                 return None
             print("Invalid selection. Try again.")
     else:
-        print("Multiple markdown files found. Opening selector...")
-        return _select_file_gui()
+        return _select_file_gui(extension, label)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -700,6 +707,29 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
+def _download_csl(style_name: str) -> Path | None:
+    """指定された CSL スタイルを公式リポジトリからダウンロードする"""
+    # 拡張子を除去してベース名を取得
+    base_name = style_name.replace(".csl", "").lower()
+    target_path = Path(f"{base_name}.csl")
+
+    url = f"https://raw.githubusercontent.com/citation-style-language/styles/master/{base_name}.csl"
+    print(f"Style '{base_name}' not found locally. Trying to download from: {url}")
+    try:
+        import requests
+        resp = requests.get(url, timeout=15)
+        if resp.status_code == 404:
+            print(f"Error: Style '{base_name}' not found in the official CSL repository.")
+            return None
+        resp.raise_for_status()
+        # OS によらず LF で保存
+        target_path.write_text(resp.text, encoding="utf-8", newline="\n")
+        print(f"✓ Downloaded: {target_path.name}")
+        return target_path
+    except Exception as e:
+        print(f"Error: Failed to download CSL '{base_name}': {e}")
+        return None
+
 def main() -> int:
     args = parse_args()
 
@@ -708,7 +738,7 @@ def main() -> int:
     if input_str:
         input_path = Path(input_str)
     else:
-        input_path = _select_input_file()
+        input_path = _select_file_generic("md", "Markdown")
 
     if not input_path:
         print("No input file selected.")
@@ -717,6 +747,45 @@ def main() -> int:
     if not input_path.exists():
         print(f"Error: File not found: {input_path}")
         return 1
+
+    # CSL Style handling
+    csl_style = args.csl_style
+    
+    # ローカルにあるか確認 (直接パス, .csl付与, 大文字小文字無視)
+    local_path = None
+    if Path(csl_style).exists() and Path(csl_style).is_file():
+        local_path = Path(csl_style)
+    elif Path(f"{csl_style}.csl").exists():
+        local_path = Path(f"{csl_style}.csl")
+    else:
+        for csl in Path.cwd().glob("*.csl"):
+            if csl.stem.lower() == csl_style.lower():
+                local_path = csl
+                break
+
+    if local_path:
+        csl_style = str(local_path)
+    else:
+        # ローカルにない場合
+        if csl_style == DEFAULT_SETTINGS["csl_style"]:
+            # デフォルトかつ存在しない場合、まず他のローカルファイルを提案
+            selected_csl = _select_file_generic("csl", "CSL Style")
+            if selected_csl:
+                csl_style = str(selected_csl)
+            else:
+                # 他になければダウンロード試行
+                downloaded = _download_csl(csl_style)
+                if downloaded:
+                    csl_style = str(downloaded)
+                else:
+                    return 1
+        else:
+            # 明示指定されたスタイルがない場合はダウンロード試行
+            downloaded = _download_csl(csl_style)
+            if downloaded:
+                csl_style = str(downloaded)
+            else:
+                return 1
 
     # Output handling
     if args.output_file:
@@ -729,7 +798,7 @@ def main() -> int:
     # Build Settings
     settings = GlobalSettings(
         pmid_regex_pattern=args.pmid_regex,
-        csl_style=args.csl_style,
+        csl_style=csl_style,
         csl_locale=args.csl_locale,
         references_header=args.references_header,
         api_key=args.api_key,
