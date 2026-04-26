@@ -52,7 +52,7 @@ except ImportError:
 class GlobalSettings:
 
     pmid_regex_pattern: str = r"(?i)\[pm(?:id)?:?\s*(\d+)\](?:\([^)]*\))?"
-    csl_style: str = "apa"
+    csl_style: str = "elsevier-vancouver"
     csl_locale: str = "en-US"
     references_header: str = "References"
     api_base_url: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
@@ -489,17 +489,17 @@ class CiteprocFormatter:
 
         for i, (group_pmids, (start, end)) in enumerate(pmid_groups):
             new_parts.append(content[last_end:start])
-            
+
             citation_str = ""
             cit = registered_citations[i]
-            
+
             # 数値スタイルの場合は自前で生成することを試みる (citeproc-pyの不安定さを回避)
             if is_numeric:
                 nums = []
                 for pmid in group_pmids:
                     if pmid in pmid_map:
                         nums.append(pmid_map[pmid])
-                
+
                 if nums:
                     nums.sort()
                     # 連続する番号をハイフンで繋ぐ処理 (例: 1,2,3 -> 1-3)
@@ -507,7 +507,7 @@ class CiteprocFormatter:
                         citation_str = f"[{nums[0]}-{nums[-1]}]"
                     else:
                         citation_str = f"[{','.join(map(str, nums))}]"
-            
+
             # 数値スタイルでない、または自前生成に失敗した場合は citeproc-py を使用
             if not citation_str:
                 if cit:
@@ -516,10 +516,10 @@ class CiteprocFormatter:
                         citation_str = str(formatted)
                     except Exception as e:
                         print(f"  [Error] Failed to format citation for {group_pmids}: {e}")
-                
+
             if not citation_str:
                 citation_str = content[start:end] # 最終フォールバック
-                
+
             new_parts.append(citation_str)
             last_end = end
 
@@ -530,19 +530,31 @@ class CiteprocFormatter:
         """参考文献リストセクションを生成する"""
         bib_items = []
 
-        # citeproc-py の bibliography() はイテレータを返し、各要素は文字列化可能
+        # citeproc-py の bibliography() は項目のイテレータを返し、
+        # 各項目 (item) はさらに整形済みパーツのイテレータとなっている。
         for item in self.bibliography.bibliography():
-            s = str(item).strip()
-            # 1. IEEEなどで "Nameand Name" のようになる現象への対策
-            s = re.sub(r"([^\s,])and\s", r"\1 and ", s)
-            # 2. "[1]Author" or "1.Author" -> "[1] Author" or "1. Author" (行頭の文献番号のみに限定)
+            # 1. パーツ間を半角スペースで結合（これで大半のフィールド間のスペース不足が解消）
+            s = " ".join(str(part).strip() for part in item if str(part).strip())
+
+            # 2. パーツ内部で発生しがちな固着を分離（これらは join では解決できない）
+            s = re.sub(r"([^\s,])and\s", r"\1 and ", s)  # Nameand -> Name and
+            s = re.sub(r"([.,])([&])", r"\1 \2", s)      # M.& -> M. &
+
+            # 3. 文献番号の直後のスペース保証（もし番号と著者が同一パーツだった場合への念押し）
+            # [^\s] を見ているので、すでにスペースがあれば置換は発生しません。
             s = re.sub(r"^(\[?\d+\]?\.?)([^\s])", r"\1 \2", s)
-            # 3. "M.&" or ",&" -> "M. &" or ", &" (APAなど)
-            s = re.sub(r"([.,])([&])", r"\1 \2", s)
-            # 4. ", ." -> "." (Suffixなどの後の不要なカンマ)
-            s = s.replace(", .", ".")
-            # 5. 二重ピリオド
-            s = s.replace("..", ".")
+
+            # 4. join によって生じる不要なスペースのクリーニング (記号周り)
+            s = re.sub(r"\s+([.,;:!])", r"\1", s)        # 句読点の前を詰める
+            s = re.sub(r"\(\s+", "(", s)                 # 括弧の開始後を詰める
+            s = re.sub(r"\s+\)", ")", s)                 # 括弧の終了前を詰める
+            s = re.sub(r"\"\s+", "\"", s)                # 引用符の開始後を詰める
+            s = re.sub(r"\s+\"", "\"", s)                # 引用符の終了前を詰める
+            s = re.sub(r"\s+([-–—/])\s+", r"\1", s)      # 範囲記号の前後を詰める
+
+            # 5. 最終的な記号の重複整理と重複スペースの統合
+            s = s.replace(",.", ".").replace("..", ".")
+            s = re.sub(r"\s+", " ", s).strip()
 
             bib_items.append(s)
 
@@ -768,7 +780,7 @@ def _download_csl(style_name: str) -> Path | None:
                     return target_path
             except requests.RequestException:
                 continue
-        
+
         print(f"Error: Style '{base_name}' not found in the official CSL repository.")
         print("Checked:")
         for url in urls:
@@ -822,7 +834,7 @@ def main() -> int:
             if csl.stem.lower() == csl_style.lower():
                 local_match = csl
                 break
-        
+
         if local_match:
             csl_style = str(local_match)
         else:
